@@ -23,6 +23,9 @@ func RegisterRoutes(mux *http.ServeMux) {
 
 	// Theme endpoint - returns tenant-specific theme configuration
 	mux.HandleFunc("GET /api/theme", ListThemes)
+
+	// Dashboard endpoint - returns aggregated NOC service health
+	mux.HandleFunc("GET /api/dashboard", ListDashboards)
 }
 
 // RegisterDiscoveryLinks returns HAL links for app-specific endpoints.
@@ -33,5 +36,6 @@ func RegisterDiscoveryLinks() map[string]interface{} {
 	// Example:
 	// links["items"] = map[string]string{"href": "/api/items"}
 		links["theme"] = map[string]string{"href": "/api/theme"}
+		links["dashboard"] = map[string]string{"href": "/api/dashboard"}
 	return links
 }

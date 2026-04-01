@@ -18,6 +18,7 @@ This document contains **AUTO-GENERATED markers** that scaffold commands append 
 | `<!-- AUTO-GENERATED: add-middleware -->` | `ds-scaffold add-middleware` | New middleware |
 | `<!-- AUTO-GENERATED: add-env-var -->` | `ds-scaffold add-env-var` | New config vars |
 - [FR-API-005] `GET /api/theme` - List themes
+- [FR-API-006] `GET /api/dashboard` - List dashboards
 
 **How it works:**
 1. Scaffold commands find the marker comment
