@@ -16,3 +16,4 @@ export { OperationsPanel } from './OperationsPanel';
 
 // Note: Button, Input, Dialog, Card should be installed separately
 // (e.g., from shadcn/ui or similar) in derived apps that need them.
+export { AlertsPanel, type AlertsPanelProps } from './AlertsPanel';

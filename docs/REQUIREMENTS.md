@@ -21,6 +21,7 @@ This document contains **AUTO-GENERATED markers** that scaffold commands append 
 - [FR-API-006] `GET /api/dashboard` - List dashboards
 - [FR-API-007] `GET /api/operations` - List operations
 - [FR-API-008] `GET /api/operations` - List operations
+- [FR-API-009] `GET /api/alerts` - List alerts
 
 **How it works:**
 1. Scaffold commands find the marker comment

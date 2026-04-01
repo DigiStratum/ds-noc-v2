@@ -29,6 +29,9 @@ func RegisterRoutes(mux *http.ServeMux) {
 
 	// Operations endpoint - returns operational data for NOC operations panel
 	mux.HandleFunc("GET /api/operations", ListOperations)
+
+	// Alerts endpoint - returns recent alerts for monitored services
+	mux.HandleFunc("GET /api/alerts", ListAlerts)
 }
 
 // RegisterDiscoveryLinks returns HAL links for app-specific endpoints.
@@ -41,5 +44,6 @@ func RegisterDiscoveryLinks() map[string]interface{} {
 		links["theme"] = map[string]string{"href": "/api/theme"}
 		links["dashboard"] = map[string]string{"href": "/api/dashboard"}
 		links["operations"] = map[string]string{"href": "/api/operations"}
+		links["alerts"] = map[string]string{"href": "/api/alerts"}
 	return links
 }
