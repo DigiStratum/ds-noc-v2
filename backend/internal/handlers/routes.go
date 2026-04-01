@@ -32,6 +32,12 @@ func RegisterRoutes(mux *http.ServeMux) {
 
 	// Alerts endpoint - returns recent alerts for monitored services
 	mux.HandleFunc("GET /api/alerts", ListAlerts)
+
+	// Feature flags endpoints
+	mux.HandleFunc("GET /api/feature-flags", ListFeatureFlags)
+	mux.HandleFunc("GET /api/feature-flags/evaluate", EvaluateFeatureFlags)
+	mux.HandleFunc("PATCH /api/feature-flags/{key}", PatchFeatureFlag)
+	mux.HandleFunc("DELETE /api/feature-flags/{key}", DeleteFeatureFlag)
 }
 
 // RegisterDiscoveryLinks returns HAL links for app-specific endpoints.
@@ -45,5 +51,7 @@ func RegisterDiscoveryLinks() map[string]interface{} {
 		links["dashboard"] = map[string]string{"href": "/api/dashboard"}
 		links["operations"] = map[string]string{"href": "/api/operations"}
 		links["alerts"] = map[string]string{"href": "/api/alerts"}
+		links["feature-flags"] = map[string]string{"href": "/api/feature-flags"}
+		links["feature-flags:evaluate"] = map[string]string{"href": "/api/feature-flags/evaluate"}
 	return links
 }
