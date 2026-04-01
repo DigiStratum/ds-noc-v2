@@ -16,5 +16,39 @@ frontend/src/components/OperationsPanel.test.tsx
 frontend/src/components/OverviewPanel.tsx
 frontend/src/components/OverviewPanel.test.tsx
 
+# AlertsPanel (subdirectory)
+frontend/src/components/AlertsPanel/AlertsPanel.tsx
+frontend/src/components/AlertsPanel/AlertsPanel.test.tsx
+frontend/src/components/AlertsPanel/index.ts
+frontend/src/components/AlertsPanel/types.ts
+
+# Additional NOC components
+frontend/src/components/AutomationDashboard.tsx
+frontend/src/components/CloudWatchPanel.tsx
+frontend/src/components/ResponseTimeChart.tsx
+frontend/src/components/FeatureFlag.tsx
+frontend/src/components/FeatureFlag/index.tsx
+
+# API client extensions
+frontend/src/api/client.ts
+frontend/src/api/dskanban.ts
+
 # Test setup
 frontend/src/test.setup.ts
+
+# Backend feature flags (NOC-specific)
+backend/internal/featureflags/evaluator.go
+backend/internal/featureflags/flags.go
+backend/internal/featureflags/store.go
+backend/internal/middleware/featureflags.go
+backend/internal/middleware/featureflags_test.go
+
+# CI/CD workflows
+.github/workflows/e2e-dev.yml
+.github/workflows/smoke-prod.yml
+
+# Tool configs
+.tool-versions
+.githooks/pre-commit
+lefthook.yml
+scripts/check-tool-versions.sh
