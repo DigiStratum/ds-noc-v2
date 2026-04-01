@@ -52,3 +52,11 @@ backend/internal/middleware/featureflags_test.go
 .githooks/pre-commit
 lefthook.yml
 scripts/check-tool-versions.sh
+
+
+# Feature flags system
+backend/internal/featureflags/evaluator.go
+backend/internal/featureflags/flags.go
+backend/internal/featureflags/store.go
+backend/internal/middleware/featureflags.go
+backend/internal/middleware/featureflags_test.go
