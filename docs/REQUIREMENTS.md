@@ -19,6 +19,7 @@ This document contains **AUTO-GENERATED markers** that scaffold commands append 
 | `<!-- AUTO-GENERATED: add-env-var -->` | `ds-scaffold add-env-var` | New config vars |
 - [FR-API-005] `GET /api/theme` - List themes
 - [FR-API-006] `GET /api/dashboard` - List dashboards
+- [FR-API-007] `GET /api/operations` - List operations
 
 **How it works:**
 1. Scaffold commands find the marker comment

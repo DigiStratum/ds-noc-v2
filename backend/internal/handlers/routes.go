@@ -37,5 +37,6 @@ func RegisterDiscoveryLinks() map[string]interface{} {
 	// links["items"] = map[string]string{"href": "/api/items"}
 		links["theme"] = map[string]string{"href": "/api/theme"}
 		links["dashboard"] = map[string]string{"href": "/api/dashboard"}
+		links["operations"] = map[string]string{"href": "/api/operations"}
 	return links
 }

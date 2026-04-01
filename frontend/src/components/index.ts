@@ -12,6 +12,7 @@ export { StatusBadge } from './StatusBadge';
 export { ServiceCard } from './ServiceCard';
 export { ServiceDetail } from './ServiceDetail';
 export { OverviewPanel } from './OverviewPanel';
+export { OperationsPanel } from './OperationsPanel';
 
 // Note: Button, Input, Dialog, Card should be installed separately
 // (e.g., from shadcn/ui or similar) in derived apps that need them.
