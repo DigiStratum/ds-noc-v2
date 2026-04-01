@@ -22,6 +22,10 @@ This document contains **AUTO-GENERATED markers** that scaffold commands append 
 - [FR-API-007] `GET /api/operations` - List operations
 - [FR-API-008] `GET /api/operations` - List operations
 - [FR-API-009] `GET /api/alerts` - List alerts
+- [FR-DATA-003] Alert: Service alert for NOC monitoring
+- [FR-DATA-004] SystemEvent: Operational events for audit trail
+- [FR-DATA-005] MaintenanceWindow: Scheduled maintenance windows
+- [FR-DATA-006] ServiceConfig: Monitored service configurations
 
 **How it works:**
 1. Scaffold commands find the marker comment
