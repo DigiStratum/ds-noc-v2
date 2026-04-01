@@ -20,6 +20,9 @@ func RegisterRoutes(mux *http.ServeMux) {
 	// mux.HandleFunc("GET /api/items", ListItems)
 	// mux.HandleFunc("POST /api/items", CreateItem)
 	// mux.HandleFunc("GET /api/items/{id}", GetItem)
+
+	// Theme endpoint - returns tenant-specific theme configuration
+	mux.HandleFunc("GET /api/theme", ListThemes)
 }
 
 // RegisterDiscoveryLinks returns HAL links for app-specific endpoints.
@@ -29,5 +32,6 @@ func RegisterDiscoveryLinks() map[string]interface{} {
 	// App links are registered here by add-endpoint.sh
 	// Example:
 	// links["items"] = map[string]string{"href": "/api/items"}
+		links["theme"] = map[string]string{"href": "/api/theme"}
 	return links
 }
