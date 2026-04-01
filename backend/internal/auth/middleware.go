@@ -172,6 +172,11 @@ func GetUser(ctx context.Context) *User {
 	return user
 }
 
+// SetUser sets the user in context (primarily for testing)
+func SetUser(ctx context.Context, user *User) context.Context {
+	return context.WithValue(ctx, userContextKey, user)
+}
+
 // GetTenant extracts tenant from context using the tenant package.
 // Returns zero Tenant if not set.
 //

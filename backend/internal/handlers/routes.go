@@ -45,6 +45,11 @@ func RegisterRoutes(mux *http.ServeMux) {
 
 	// CloudWatch metrics endpoint
 	mux.HandleFunc("GET /api/cloudwatch/metrics", cloudwatch.Handler)
+
+	// Session/user endpoints
+	mux.HandleFunc("GET /api/session", ListSessions)
+	mux.HandleFunc("GET /api/me", ListMes)
+	mux.HandleFunc("GET /api/tenant", ListTenants)
 }
 
 // RegisterDiscoveryLinks returns HAL links for app-specific endpoints.
@@ -61,5 +66,8 @@ func RegisterDiscoveryLinks() map[string]interface{} {
 		links["feature-flags"] = map[string]string{"href": "/api/feature-flags"}
 		links["feature-flags:evaluate"] = map[string]string{"href": "/api/feature-flags/evaluate"}
 		links["cloudwatch:metrics"] = map[string]string{"href": "/api/cloudwatch/metrics"}
+		links["session"] = map[string]string{"href": "/api/session"}
+		links["me"] = map[string]string{"href": "/api/me"}
+		links["tenant"] = map[string]string{"href": "/api/tenant"}
 	return links
 }

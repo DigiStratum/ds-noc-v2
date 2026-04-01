@@ -26,6 +26,9 @@ This document contains **AUTO-GENERATED markers** that scaffold commands append 
 - [FR-DATA-004] SystemEvent: Operational events for audit trail
 - [FR-DATA-005] MaintenanceWindow: Scheduled maintenance windows
 - [FR-DATA-006] ServiceConfig: Monitored service configurations
+- [FR-API-010] `GET /api/session` - Get current session state (works for both guest and authenticated users)
+- [FR-API-011] `GET /api/me` - Get current authenticated user (returns 401 if not authenticated)
+- [FR-API-012] `GET /api/tenant` - Get current tenant context
 
 **How it works:**
 1. Scaffold commands find the marker comment
