@@ -1,0 +1,16 @@
+# Template Overrides
+# ==================
+# Files listed here are app customizations of template files.
+# These will NOT be overwritten during template updates.
+
+# Service components - NOC-specific UI components
+frontend/src/components/ServiceCard.tsx
+frontend/src/components/ServiceCard.test.tsx
+frontend/src/components/ServiceDetail.tsx
+frontend/src/components/ServiceDetail.test.tsx
+frontend/src/components/StatusBadge.tsx
+frontend/src/components/StatusBadge.test.tsx
+frontend/src/components/index.ts
+
+# Test setup
+frontend/src/test.setup.ts

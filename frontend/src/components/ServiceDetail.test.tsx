@@ -5,7 +5,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { ServiceDetail } from './ServiceDetail';
-import type { ServiceHealth, HealthCheck } from '../types';
+import type { ServiceHealth } from '../types';
 
 const fullService: ServiceHealth = {
   status: 'healthy',
