@@ -119,6 +119,7 @@ export function Layout({
       showThemeToggle={false}
       showUserMenu={showUserMenu}
       showGdprBanner={showGdprBanner}
+      getMenuItems={() => config.menuItems || []}
       customHeader={customHeader ?? <EmptyCustomHeader />}
       headerAdSlot={headerAdSlot ?? <EmptyAdSlot position="header" />}
       footerAdSlot={footerAdSlot ?? <EmptyAdSlot position="footer" />}

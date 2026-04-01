@@ -13,7 +13,13 @@ export { ServiceCard } from './ServiceCard';
 export { ServiceDetail } from './ServiceDetail';
 export { OverviewPanel } from './OverviewPanel';
 export { OperationsPanel } from './OperationsPanel';
+export { CloudWatchPanel } from './CloudWatchPanel';
+export { ResponseTimeChart } from './ResponseTimeChart';
+export { AutomationDashboard } from './AutomationDashboard';
 
 // Note: Button, Input, Dialog, Card should be installed separately
 // (e.g., from shadcn/ui or similar) in derived apps that need them.
 export { AlertsPanel, type AlertsPanelProps } from './AlertsPanel';
+
+// Feature flags - re-exported from ds-core
+export { FeatureFlag, withFeatureFlag, type FeatureFlagProps } from './FeatureFlag';

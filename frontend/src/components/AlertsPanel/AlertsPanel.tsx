@@ -5,7 +5,7 @@
 
 import { useState } from 'react';
 import { useAlerts } from '../../hooks';
-import type { AlertsPanelProps, severityColors, severityTextColors, typeIcons } from './types';
+import type { AlertsPanelProps } from './types';
 
 /**
  * AlertsPanel Component

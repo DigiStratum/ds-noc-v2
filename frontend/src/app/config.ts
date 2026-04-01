@@ -66,13 +66,13 @@ function getBaseUrl(): string {
 // TODO: Update these values for your app
 const config: AppConfig = {
   id: 'dsnocv2',
-  name: 'DS Noc V2',
+  name: 'DS NOC',
   logo: getEcosystemLogo(),
   baseUrl: getBaseUrl(),
   ssoUrl: getSsoUrl(),
   menuItems: [
-    // Add your app's navigation items here
-    // { label: 'Dashboard', href: '/dashboard', icon: 'dashboard' },
+    { id: 'dashboard', label: 'Dashboard', path: '/dashboard', icon: '📊' },
+    { id: 'automation', label: 'Automation', path: '/automation', icon: '🤖' },
   ],
   footerLinks: [
     // Add app-specific footer links here (Privacy/Terms/Support provided by DSAppShell)
