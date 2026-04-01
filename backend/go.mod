@@ -1,6 +1,6 @@
 module github.com/DigiStratum/ds-noc-v2/backend
 
-go 1.26.1
+go 1.24.2
 
 require (
 	github.com/DigiStratum/GoLib v0.0.0-20260325014939-11357b31f9c6
@@ -8,6 +8,7 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.41.5
 	github.com/aws/aws-sdk-go-v2/config v1.32.13
 	github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue v1.20.37
+	github.com/aws/aws-sdk-go-v2/service/cloudwatch v1.55.3
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.57.1
 	github.com/awslabs/aws-lambda-go-api-proxy v0.16.2
 	github.com/google/uuid v1.5.0
@@ -20,7 +21,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.21 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.21 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/ini v1.8.6 // indirect
-	github.com/aws/aws-sdk-go-v2/service/cloudwatch v1.55.3 // indirect
 	github.com/aws/aws-sdk-go-v2/service/dynamodbstreams v1.32.14 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.7 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/endpoint-discovery v1.11.21 // indirect
