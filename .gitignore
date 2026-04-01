@@ -39,3 +39,7 @@ cdk.out/
 
 # Go
 vendor/
+
+# Test artifacts
+frontend/e2e-results.json
+frontend/playwright-report/
