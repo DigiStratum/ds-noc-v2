@@ -7,5 +7,10 @@
 export { LoadingSpinner } from './LoadingSpinner';
 export { ErrorBoundary } from './ErrorBoundary';
 
+// NOC-specific components
+export { StatusBadge } from './StatusBadge';
+export { ServiceCard } from './ServiceCard';
+export { ServiceDetail } from './ServiceDetail';
+
 // Note: Button, Input, Dialog, Card should be installed separately
 // (e.g., from shadcn/ui or similar) in derived apps that need them.
