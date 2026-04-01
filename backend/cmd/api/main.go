@@ -31,6 +31,11 @@ func main() {
 	mux.HandleFunc("GET /api/discovery", discovery.Handler(handlers.RegisterDiscoveryLinks))
 	mux.HandleFunc("GET /api/session", session.Handler)
 
+	// Auth routes - DSAccount SSO integration
+	mux.HandleFunc("GET /api/auth/login", auth.LoginHandler)
+	mux.HandleFunc("GET /api/auth/callback", auth.CallbackHandler)
+	mux.HandleFunc("GET /api/auth/logout", auth.LogoutHandler)
+
 	// App routes (managed by add-endpoint.sh)
 	handlers.RegisterRoutes(mux)
 
