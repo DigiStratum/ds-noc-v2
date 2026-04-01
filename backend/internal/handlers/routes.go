@@ -2,7 +2,11 @@
 // This file is APP-OWNED and will not be overwritten by template updates.
 package handlers
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/DigiStratum/ds-noc-v2/backend/internal/cloudwatch"
+)
 
 // RegisterRoutes registers all app-specific routes.
 // Called from main.go during server initialization.
@@ -38,6 +42,9 @@ func RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/feature-flags/evaluate", EvaluateFeatureFlags)
 	mux.HandleFunc("PATCH /api/feature-flags/{key}", PatchFeatureFlag)
 	mux.HandleFunc("DELETE /api/feature-flags/{key}", DeleteFeatureFlag)
+
+	// CloudWatch metrics endpoint
+	mux.HandleFunc("GET /api/cloudwatch/metrics", cloudwatch.Handler)
 }
 
 // RegisterDiscoveryLinks returns HAL links for app-specific endpoints.
@@ -53,5 +60,6 @@ func RegisterDiscoveryLinks() map[string]interface{} {
 		links["alerts"] = map[string]string{"href": "/api/alerts"}
 		links["feature-flags"] = map[string]string{"href": "/api/feature-flags"}
 		links["feature-flags:evaluate"] = map[string]string{"href": "/api/feature-flags/evaluate"}
+		links["cloudwatch:metrics"] = map[string]string{"href": "/api/cloudwatch/metrics"}
 	return links
 }
