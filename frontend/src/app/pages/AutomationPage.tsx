@@ -10,7 +10,7 @@
  */
 
 import { useTranslation } from 'react-i18next';
-import { AutomationDashboard } from '../../components/AutomationDashboard';
+import { AutomationDashboard } from '../../components';
 
 export function AutomationPage() {
   const { t } = useTranslation();
