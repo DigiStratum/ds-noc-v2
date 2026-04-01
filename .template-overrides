@@ -60,3 +60,8 @@ backend/internal/featureflags/flags.go
 backend/internal/featureflags/store.go
 backend/internal/middleware/featureflags.go
 backend/internal/middleware/featureflags_test.go
+
+# CloudWatch metrics integration
+backend/internal/cloudwatch/doc.go
+backend/internal/cloudwatch/handler.go
+backend/internal/cloudwatch/handler_test.go
