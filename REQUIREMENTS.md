@@ -4,6 +4,121 @@ Requirements traceability document for ds-noc-v2 Network Operations Center appli
 
 ---
 
+## Migration Checklist (from ds-app-noc v1)
+
+This section documents all features from ds-app-noc that need to be migrated to ds-noc-v2.
+**Source:** `~/repos/digistratum/ds-app-noc`
+
+### Backend Endpoints
+
+| Method | Path | Handler | Status | Notes |
+|--------|------|---------|--------|-------|
+| GET | `/api/dashboard` | `api.DashboardHandler` | TODO | Aggregated health status of all monitored services |
+| GET | `/api/operations` | `api.OperationsHandler` | TODO | Operational data (events, quick actions, maintenance windows) |
+| GET | `/api/alerts` | `api.AlertsHandler` | TODO | Service alerts by severity |
+| GET | `/api/cloudwatch/metrics` | `cloudwatch.Handler` | TODO | CloudWatch metrics data (latency, errors, invocations) |
+
+### Backend Models
+
+#### Service Health Models (`internal/api/dashboard.go`)
+
+| Model | Key Fields | Status |
+|-------|------------|--------|
+| `ServiceHealth` | status, version, uptime, timestamp, service, environment, checks, memory, cpu, connections, responseTimeMs | TODO |
+| `HealthCheck` | status, latencyMs, message | TODO |
+| `MemoryStats` | heapUsedMB, heapTotalMB, rssMB, percentUsed | TODO |
+| `CPUStats` | loadAverage[3], percentUsed | TODO |
+| `ConnectionStats` | database (DBConnStats), http (HTTPConnStats) | TODO |
+| `DBConnStats` | active, idle, max | TODO |
+| `HTTPConnStats` | active, pending | TODO |
+| `DashboardState` | services (map[string]*ServiceHealth), lastUpdated, overallStatus | TODO |
+| `ServiceConfig` | id, name, url, healthEndpoint, critical | TODO |
+
+#### Operations Models (`internal/api/operations.go`)
+
+| Model | Key Fields | Status |
+|-------|------------|--------|
+| `SystemEvent` | id, timestamp, type (deployment/alert/maintenance/config_change), severity, service, message, user | TODO |
+| `QuickAction` | id, name, description, icon, enabled | TODO |
+| `MaintenanceWindow` | id, service, startTime, endTime, description | TODO |
+| `SystemLoad` | requestsPerMinute, activeConnections, queuedJobs, errorRate | TODO |
+| `OperationsData` | events, quickActions, scheduleMaintenanceWindows, systemLoad | TODO |
+
+#### Alert Models (`internal/api/alerts.go`)
+
+| Model | Key Fields | Status |
+|-------|------------|--------|
+| `Alert` | id, serviceId, serviceName, timestamp, type (recovery/outage/degradation/change), severity (critical/warning/info), previousStatus, currentStatus, message, latencyMs | TODO |
+| `AlertsResponse` | alerts, count, since | TODO |
+
+#### CloudWatch Models (`internal/cloudwatch/handler.go`)
+
+| Model | Key Fields | Status |
+|-------|------------|--------|
+| `MetricDatapoint` | timestamp, value, unit | TODO |
+| `MetricStatistics` | average, maximum, minimum, sum | TODO |
+| `MetricResult` | metricName, namespace, dimensions, unit, datapoints, statistics | TODO |
+| `MetricsResponse` | metrics, period, startTime, endTime | TODO |
+| `MetricQuery` | namespace, metricName, dimensions, stat, unit | TODO |
+
+### Frontend Pages
+
+| Page | File | Status | Notes |
+|------|------|--------|-------|
+| NOC Dashboard | `src/pages/NocDashboard.tsx` | TODO | Main NOC dashboard with service grid |
+| Automation | `src/pages/Automation.tsx` | TODO | CI/CD and automation dashboard |
+| Dashboard | `src/pages/Dashboard.tsx` | TODO | General dashboard page |
+| Home | `src/pages/Home.tsx` | TODO | Landing page |
+| Settings | `src/pages/Settings.tsx` | TODO | App settings |
+
+### Frontend Components
+
+| Component | File | Status | Notes |
+|-----------|------|--------|-------|
+| OverviewPanel | `src/components/OverviewPanel.tsx` | TODO | Dashboard overview stats |
+| AlertsPanel | `src/components/AlertsPanel.tsx` | TODO | Alert list with severity |
+| CloudWatchPanel | `src/components/CloudWatchPanel.tsx` | TODO | CloudWatch metrics display |
+| OperationsPanel | `src/components/OperationsPanel.tsx` | TODO | Events, actions, maintenance |
+| ServiceCard | `src/components/ServiceCard.tsx` | Partial | Compact service health card |
+| StatusBadge | `src/components/ServiceCard.tsx` | Partial | Status indicator badge |
+| ServiceDetail | `src/components/ServiceDetail.tsx` | Partial | Full service detail modal |
+| ResponseTimeChart | `src/components/ResponseTimeChart.tsx` | TODO | Response time visualization |
+| AutomationDashboard | `src/components/AutomationDashboard.tsx` | TODO | DSKanban automation stats |
+
+### Frontend Hooks
+
+| Hook | File | Status | Notes |
+|------|------|--------|-------|
+| useDashboard | `src/hooks/useDashboard.ts` | TODO | Dashboard data polling (10s interval) |
+| useAutomation | `src/hooks/useAutomation.ts` | TODO | DSKanban automation data (30s interval) |
+| useAutomationQueue | `src/hooks/useAutomation.ts` | TODO | Queue status for next items |
+| useConsent | `src/hooks/useConsent.ts` | TODO | Cookie consent management |
+| useTenantTheme | `src/hooks/useTenantTheme.ts` | TODO | Tenant theming support |
+
+### Frontend Types (`src/types.ts`)
+
+| Type | Key Fields | Status |
+|------|------------|--------|
+| `ServiceHealth` | status, version, uptime, timestamp, service, environment, checks, memory, cpu, connections, responseTimeMs | Partial |
+| `HealthCheck` | status, latencyMs, message | Partial |
+| `MemoryStats` | heapUsedMB, heapTotalMB, rssMB, percentUsed | Partial |
+| `CpuStats` | loadAverage, percentUsed | Partial |
+| `ConnectionStats` | database, http | Partial |
+| `ServiceConfig` | id, name, url, healthEndpoint, criticalService | TODO |
+| `DashboardState` | services, lastUpdated, overallStatus | Partial |
+| `HistoricalDataPoint` | timestamp, responseTimeMs, status, errorRate | Partial |
+| `ServiceHistory` | serviceId, dataPoints | Partial |
+
+### API Client (`src/api/`)
+
+| File | Purpose | Status |
+|------|---------|--------|
+| `client.ts` | Base API client with fetch wrapper | TODO |
+| `dskanban.ts` | DSKanban API integration for automation stats | TODO |
+| `index.ts` | API exports | TODO |
+
+---
+
 ## Functional Requirements
 
 ### FR-NOC-001: Service Health Monitoring Dashboard
