@@ -1,0 +1,21 @@
+{
+  "name": "ds-noc-v2",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DS Noc V2 - A DS Ecosystem App",
+  "scripts": {
+    "dev": "pnpm --filter frontend dev",
+    "build": "pnpm --filter frontend build",
+    "test": "pnpm -r test",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  },
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=8"
+  },
+  "packageManager": "pnpm@8.15.0"
+}

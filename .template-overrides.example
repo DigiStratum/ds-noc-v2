@@ -1,0 +1,12 @@
+# Template Overrides
+# ==================
+# List files here that your app has customized and should NOT be overwritten
+# by template updates. Use exact file paths (no directories or globs).
+#
+# Example:
+#   frontend/src/api/client.ts
+#   frontend/src/components/Shell.tsx
+#   docs/getting-started.md
+#
+# These files exist in .template-manifest but your app needs custom versions.
+# The update-from-template tool will skip these files during sync.

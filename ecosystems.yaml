@@ -1,0 +1,34 @@
+# ecosystems.yaml - Multi-ecosystem deployment configuration
+#
+# This file declares which ecosystems your app participates in.
+# When present, CDK creates:
+#   - {app}-data-{env}-{ecosystem} stacks (one per ecosystem-env)
+#   - {app}-app-{env} stack (single CF distribution for all ecosystems)
+#
+# Without ecosystems.yaml, the app runs in legacy single-ecosystem mode
+# (hardcoded to digistratum.com).
+#
+# See: docs/ECOSYSTEMS.md for schema documentation and examples.
+
+version: 1
+
+app:
+  # App name - used in stack names, resource names, and domain prefixes
+  # Example: "myapp" -> myapp.digistratum.com, myapp.leapkick.com
+  name: ds-noc-v2
+
+  # Human-readable display name (optional, for UI/logging)
+  displayName: "DS Noc V2"
+
+ecosystems:
+  # DigiStratum ecosystem (enabled by default)
+  - name: digistratum
+    enabled: true
+    # SSO app ID registered with account.digistratum.com
+    # Typically matches app.name unless you need a different ID
+    sso_app_id: ds-noc-v2
+
+  # To add LeapKick ecosystem, uncomment and configure:
+  # - name: leapkick
+  #   enabled: true
+  #   sso_app_id: ds-noc-v2

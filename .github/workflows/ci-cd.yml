@@ -1,0 +1,1632 @@
+# CI/CD Pipeline for ds-noc-v2
+# Auto-generated from ds-app-template
+#
+# Required GitHub Secrets:
+#   AWS_ROLE_ARN    - OIDC role for AWS deployments
+#   AWS_ACCOUNT_ID  - Target AWS account
+#
+# Required IAM Permissions for OIDC Role:
+#   - S3: s3:GetObject on arn:aws:s3:::ds-infra-config/ecosystems.json
+#         (Ecosystem registry access - required for multi-ecosystem deployments)
+#   - Standard CDK deployment permissions (CloudFormation, Lambda, S3, etc.)
+#   See docs/CI_CD.md for full IAM policy details.
+#
+# Required GitHub Environments:
+#   development     - For dev deployments (develop branch)
+#   production      - For prod deployments (main branch, requires approval)
+
+name: CI/CD
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - prod
+      run_maturity:
+        description: 'Run maturity assessment'
+        required: false
+        default: false
+        type: boolean
+  push:
+    branches: [main, develop]
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
+      - ".github/CODEOWNERS"
+      - "LICENSE"
+  pull_request:
+    branches: [main, develop]
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
+
+env:
+  GO_VERSION: '1.24'
+  GOTOOLCHAIN: 'local'
+  NODE_VERSION: '20'
+  PNPM_VERSION: '8'
+  AWS_REGION: 'us-west-2'
+  APP_NAME: 'ds-noc-v2'  # Replaced by create-app.sh
+  # Set to 'true' for apps that want maturity gate to block PRs
+  MATURITY_GATE_REQUIRED: 'false'
+
+permissions:
+  id-token: write   # Required for OIDC
+  contents: read
+  checks: write     # For test result annotations
+  pull-requests: write  # For maturity PR comments
+
+jobs:
+  # ============================================================
+  # Template Detection - Skip CI for ds-app-template itself
+  # ============================================================
+  template-check:
+    runs-on: ubuntu-latest
+    outputs:
+      is_template: ${{ steps.check.outputs.is_template }}
+    steps:
+      - name: Check if running on template repo
+        id: check
+        run: |
+          if [[ "${{ github.repository }}" == *"ds-app-template"* ]]; then
+            echo "is_template=true" >> $GITHUB_OUTPUT
+            echo "⚠️ This is ds-app-template - CI will be skipped"
+          else
+            echo "is_template=false" >> $GITHUB_OUTPUT
+          fi
+
+  # ============================================================
+  # Environment Detection - Single source of truth
+  # ============================================================
+  detect-environment:
+    needs: template-check
+    if: needs.template-check.outputs.is_template != 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.detect.outputs.environment }}
+      is_deploy: ${{ steps.detect.outputs.is_deploy }}
+    steps:
+      - name: Detect target environment
+        id: detect
+        run: |
+          # Environment detection precedence:
+          # 1. workflow_dispatch explicit input (highest priority)
+          # 2. Branch mapping: main→prod, develop→dev
+          # 3. Default: none (PR builds, feature branches)
+          
+          EVENT="${{ github.event_name }}"
+          BRANCH="${{ github.ref }}"
+          DISPATCH_ENV="${{ github.event.inputs.environment }}"
+          
+          echo "📍 Environment Detection"
+          echo "  Event: ${EVENT}"
+          echo "  Branch: ${BRANCH}"
+          echo "  Dispatch input: ${DISPATCH_ENV:-'(none)'}"
+          
+          if [ "$EVENT" = "workflow_dispatch" ] && [ -n "$DISPATCH_ENV" ]; then
+            # workflow_dispatch with explicit environment takes precedence
+            ENV="$DISPATCH_ENV"
+            IS_DEPLOY="true"
+            echo "  ✓ Using workflow_dispatch environment: ${ENV}"
+          elif [ "$EVENT" = "push" ] && [ "$BRANCH" = "refs/heads/main" ]; then
+            ENV="prod"
+            IS_DEPLOY="true"
+            echo "  ✓ Branch 'main' → environment: prod"
+          elif [ "$EVENT" = "push" ] && [ "$BRANCH" = "refs/heads/develop" ]; then
+            ENV="dev"
+            IS_DEPLOY="true"
+            echo "  ✓ Branch 'develop' → environment: dev"
+          else
+            ENV="none"
+            IS_DEPLOY="false"
+            echo "  ⚠️ No deployment (PR or feature branch)"
+          fi
+          
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🎯 Target Environment: ${ENV}"
+          echo "   Deploy: ${IS_DEPLOY}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          echo "environment=${ENV}" >> $GITHUB_OUTPUT
+          echo "is_deploy=${IS_DEPLOY}" >> $GITHUB_OUTPUT
+
+  # ============================================================
+  # Determine what changed (smart path detection)
+  # ============================================================
+  changes:
+    needs: template-check
+    if: needs.template-check.outputs.is_template != 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.changes.outputs.backend }}
+      frontend: ${{ steps.changes.outputs.frontend }}
+      infra: ${{ steps.changes.outputs.infra }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: dorny/paths-filter@v3
+        id: changes
+        with:
+          filters: |
+            backend:
+              - 'backend/**'
+              - 'ecosystems.yaml'
+              - '.template-version'
+              - '.template-config'
+              - 'maturity.yaml'
+            frontend:
+              - 'frontend/**'
+              - 'ecosystems.yaml'
+              - '.template-version'
+              - '.template-config'
+              - 'maturity.yaml'
+            infra:
+              - 'infra/**'
+              - 'ecosystems.yaml'
+              - '.template-version'
+              - '.template-config'
+              - 'maturity.yaml'
+
+  # ============================================================
+  # Parse ecosystems.yaml - Extract enabled ecosystems
+  # ============================================================
+  parse-ecosystems:
+    needs: template-check
+    if: needs.template-check.outputs.is_template != 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      enabled_ecosystems: ${{ steps.parse.outputs.enabled_ecosystems }}
+      app_ecosystems_json: ${{ steps.parse.outputs.app_ecosystems_json }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse ecosystems.yaml
+        id: parse
+        run: |
+          ECOSYSTEMS_FILE="ecosystems.yaml"
+          
+          # Default to single ecosystem if file missing or malformed
+          DEFAULT_ECOSYSTEMS='["digistratum"]'
+          DEFAULT_APP_CONFIG='{"ecosystems":[{"name":"digistratum","enabled":true}]}'
+          
+          if [ ! -f "$ECOSYSTEMS_FILE" ]; then
+            echo "⚠️ ecosystems.yaml not found, using default: $DEFAULT_ECOSYSTEMS"
+            echo "enabled_ecosystems=$DEFAULT_ECOSYSTEMS" >> $GITHUB_OUTPUT
+            echo "app_ecosystems_json=$DEFAULT_APP_CONFIG" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Parse enabled ecosystems using yq (pre-installed on GitHub runners)
+          # Filter for ecosystems where enabled == true, extract names as JSON array
+          # Use -I 0 for compact single-line JSON output (required for GITHUB_OUTPUT)
+          ENABLED=$(yq -I 0 -o=json '.ecosystems | map(select(.enabled == true)) | map(.name)' "$ECOSYSTEMS_FILE" 2>/dev/null) || {
+            echo "⚠️ Failed to parse ecosystems.yaml, using default: $DEFAULT_ECOSYSTEMS"
+            echo "enabled_ecosystems=$DEFAULT_ECOSYSTEMS" >> $GITHUB_OUTPUT
+            echo "app_ecosystems_json=$DEFAULT_APP_CONFIG" >> $GITHUB_OUTPUT
+            exit 0
+          }
+          
+          # Validate we got a non-empty array
+          if [ -z "$ENABLED" ] || [ "$ENABLED" = "null" ] || [ "$ENABLED" = "[]" ]; then
+            echo "⚠️ No enabled ecosystems found, using default: $DEFAULT_ECOSYSTEMS"
+            echo "enabled_ecosystems=$DEFAULT_ECOSYSTEMS" >> $GITHUB_OUTPUT
+            echo "app_ecosystems_json=$DEFAULT_APP_CONFIG" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Also output the full app ecosystems config for merging
+          # Use -I 0 for compact single-line JSON output (required for GITHUB_OUTPUT)
+          APP_CONFIG=$(yq -I 0 -o=json '.' "$ECOSYSTEMS_FILE" 2>/dev/null) || APP_CONFIG="$DEFAULT_APP_CONFIG"
+          
+          echo "✓ Found enabled ecosystems: $ENABLED"
+          echo "enabled_ecosystems=$ENABLED" >> $GITHUB_OUTPUT
+          echo "app_ecosystems_json=$APP_CONFIG" >> $GITHUB_OUTPUT
+
+  # ============================================================
+  # Fetch Ecosystem Registry from S3
+  # ============================================================
+  fetch-ecosystem-registry:
+    needs: [template-check, parse-ecosystems]
+    if: needs.template-check.outputs.is_template != 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      combined_config: ${{ steps.merge.outputs.combined_config }}
+      registry_available: ${{ steps.fetch.outputs.registry_available }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Fetch ecosystem registry from S3
+        id: fetch
+        run: |
+          REGISTRY_BUCKET="s3://ds-infra-config/ecosystems.json"
+          REGISTRY_FILE="ecosystems-registry.json"
+          
+          echo "Fetching ecosystem registry from ${REGISTRY_BUCKET}..."
+          
+          # Capture stderr for better error reporting
+          S3_OUTPUT=$(aws s3 cp "${REGISTRY_BUCKET}" "${REGISTRY_FILE}" 2>&1) && S3_SUCCESS=true || S3_SUCCESS=false
+          
+          if [ "$S3_SUCCESS" = "true" ]; then
+            echo "✓ Registry fetched successfully"
+            echo "registry_available=true" >> $GITHUB_OUTPUT
+            
+            # Validate registry structure
+            if ! jq -e '.ecosystems' "${REGISTRY_FILE}" > /dev/null 2>&1; then
+              echo "::error::Invalid registry structure: missing 'ecosystems' key"
+              exit 1
+            fi
+            
+            # Log available ecosystems
+            AVAILABLE=$(jq -r '.ecosystems | keys | join(", ")' "${REGISTRY_FILE}")
+            echo "Available ecosystems in registry: ${AVAILABLE}"
+          else
+            # Check if it's an access denied error
+            if echo "$S3_OUTPUT" | grep -qi "AccessDenied\|Access Denied"; then
+              echo "::error::S3 Access Denied fetching ecosystem registry"
+              echo "::error::The OIDC role needs s3:GetObject permission on arn:aws:s3:::ds-infra-config/ecosystems.json"
+              echo "::error::See docs/CI_CD.md for required IAM policy"
+              echo ""
+              echo "Add this to your OIDC role policy:"
+              echo '  {"Effect":"Allow","Action":["s3:GetObject"],"Resource":"arn:aws:s3:::ds-infra-config/ecosystems.json"}'
+              echo ""
+              echo "registry_available=false" >> $GITHUB_OUTPUT
+              # Don't exit 1 - allow fallback for single-ecosystem apps
+            else
+              echo "::warning::Could not fetch ecosystem registry from S3: $S3_OUTPUT"
+              echo "registry_available=false" >> $GITHUB_OUTPUT
+            fi
+            
+            # Create empty registry for fallback
+            echo '{"ecosystems":{}}' > "${REGISTRY_FILE}"
+          fi
+
+      - name: Merge app config with registry
+        id: merge
+        run: |
+          REGISTRY_FILE="ecosystems-registry.json"
+          ENABLED_ECOSYSTEMS='${{ needs.parse-ecosystems.outputs.enabled_ecosystems }}'
+          APP_CONFIG='${{ needs.parse-ecosystems.outputs.app_ecosystems_json }}'
+          
+          echo "Enabled ecosystems from app: ${ENABLED_ECOSYSTEMS}"
+          
+          # Create combined config with registry details for enabled ecosystems only
+          COMBINED=$(jq -n \
+            --argjson registry "$(cat ${REGISTRY_FILE})" \
+            --argjson enabled "${ENABLED_ECOSYSTEMS}" \
+            --argjson appConfig "${APP_CONFIG}" \
+            '{
+              app: ($appConfig.app // {name: "unknown"}),
+              ecosystems: (
+                $enabled | map(. as $name | {
+                  name: $name,
+                  app_config: ($appConfig.ecosystems // [] | map(select(.name == $name)) | .[0] // {}),
+                  registry: ($registry.ecosystems[$name] // null)
+                })
+              )
+            }')
+          
+          # Validate all enabled ecosystems exist in registry
+          MISSING=$(echo "$COMBINED" | jq -r '.ecosystems | map(select(.registry == null)) | map(.name) | join(", ")')
+          
+          if [ -n "$MISSING" ] && [ "$MISSING" != "" ]; then
+            if [ "${{ steps.fetch.outputs.registry_available }}" = "true" ]; then
+              echo "::error::Ecosystems not found in registry: ${MISSING}"
+              echo "These ecosystems are enabled in ecosystems.yaml but not defined in the central registry."
+              echo "Available ecosystems: $(jq -r '.ecosystems | keys | join(", ")' ${REGISTRY_FILE})"
+              exit 1
+            else
+              echo "::warning::Registry unavailable - proceeding without validation for: ${MISSING}"
+            fi
+          fi
+          
+          # Output combined config (escape newlines for GitHub output)
+          COMBINED_ESCAPED=$(echo "$COMBINED" | jq -c .)
+          echo "combined_config=${COMBINED_ESCAPED}" >> $GITHUB_OUTPUT
+          
+          echo "✓ Combined config created:"
+          echo "$COMBINED" | jq .
+          
+          # Save for artifact
+          echo "$COMBINED" > combined-ecosystem-config.json
+
+      - name: Upload combined config
+        uses: actions/upload-artifact@v4
+        with:
+          name: ecosystem-config
+          path: combined-ecosystem-config.json
+          retention-days: 7
+
+  # ============================================================
+  # Maturity Assessment (optional, informational by default)
+  # ============================================================
+  maturity:
+    needs: template-check
+    runs-on: ubuntu-latest
+    if: |
+      needs.template-check.outputs.is_template != 'true' &&
+      github.event_name == 'pull_request' && 
+      (github.event.inputs.run_maturity == 'true' || github.event.inputs.run_maturity == true)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Clone GoTools
+        run: |
+          git clone --depth 1 https://github.com/digistratum/GoTools.git /tmp/GoTools
+
+      - name: Run maturity assessment
+        id: assess
+        run: |
+          cd /tmp/GoTools
+          
+          # Run assessment and capture output
+          OUTPUT=$(go run ./cmd/assess-maturity --json --target "${{ github.workspace }}" 2>&1) || true
+          
+          # Save JSON output for artifact
+          echo "$OUTPUT" > "${{ github.workspace }}/maturity-report.json"
+          
+          # Extract key metrics for summary
+          LEVEL=$(echo "$OUTPUT" | jq -r '.current_level // "unknown"')
+          TARGET=$(echo "$OUTPUT" | jq -r '.target_level // "unknown"')
+          SCORE=$(echo "$OUTPUT" | jq -r '.score // 0')
+          
+          echo "level=${LEVEL}" >> $GITHUB_OUTPUT
+          echo "target=${TARGET}" >> $GITHUB_OUTPUT
+          echo "score=${SCORE}" >> $GITHUB_OUTPUT
+          
+          # Store full output for comment
+          echo "report<<EOF" >> $GITHUB_OUTPUT
+          echo "$OUTPUT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Upload maturity report
+        uses: actions/upload-artifact@v4
+        with:
+          name: maturity-report
+          path: maturity-report.json
+          retention-days: 30
+
+      - name: Post maturity comment on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const level = '${{ steps.assess.outputs.level }}';
+            const target = '${{ steps.assess.outputs.target }}';
+            const score = '${{ steps.assess.outputs.score }}';
+            
+            let report;
+            try {
+              report = JSON.parse(`${{ steps.assess.outputs.report }}`);
+            } catch (e) {
+              report = { error: 'Could not parse maturity report' };
+            }
+            
+            const gaps = report.gaps || [];
+            const gapsList = gaps.length > 0 
+              ? gaps.map(g => `- ${g.category}: ${g.requirement}`).join('\n')
+              : 'None identified';
+            
+            const body = `## 📊 Maturity Assessment
+            
+            | Metric | Value |
+            |--------|-------|
+            | **Current Level** | ${level} |
+            | **Target Level** | ${target} |
+            | **Score** | ${score}% |
+            
+            ### Gaps to Next Level
+            ${gapsList}
+            
+            ---
+            *This is an informational check. ${process.env.MATURITY_GATE_REQUIRED === 'true' ? '⚠️ **Maturity gate is REQUIRED for this repo.**' : 'To make this blocking, set `MATURITY_GATE_REQUIRED=true` in the workflow env.'}*`;
+            
+            // Find existing comment to update
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            
+            const botComment = comments.find(c => 
+              c.user.type === 'Bot' && c.body.includes('📊 Maturity Assessment')
+            );
+            
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body
+              });
+            }
+
+      - name: Enforce maturity gate (if required)
+        if: env.MATURITY_GATE_REQUIRED == 'true'
+        run: |
+          LEVEL="${{ steps.assess.outputs.level }}"
+          TARGET="${{ steps.assess.outputs.target }}"
+          
+          # Simple level comparison (assumes levels are like L0, L1, L2, L3, L4)
+          LEVEL_NUM=$(echo "$LEVEL" | grep -oE '[0-9]+' || echo "0")
+          TARGET_NUM=$(echo "$TARGET" | grep -oE '[0-9]+' || echo "0")
+          
+          if [ "$LEVEL_NUM" -lt "$TARGET_NUM" ]; then
+            echo "::error::Maturity gate failed: Current level ($LEVEL) is below target ($TARGET)"
+            exit 1
+          fi
+          
+          echo "✓ Maturity gate passed: $LEVEL meets or exceeds target $TARGET"
+
+  # ============================================================
+  # Backend: Test + Build
+  # ============================================================
+  backend:
+    runs-on: ubuntu-latest
+    needs: changes
+    if: |
+      needs.changes.outputs.backend == 'true' || 
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'))
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Lint (golangci-lint)
+        uses: golangci/golangci-lint-action@v4
+        with:
+          version: latest
+          working-directory: backend
+          args: --timeout=5m
+
+      - name: Run tests
+        run: |
+          go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+          go tool cover -func=coverage.out | tail -1
+
+      - name: Build Lambda binary
+        working-directory: tools
+        run: go run ./cmd/build-backend backend/dist/bootstrap
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-binary
+          path: backend/dist/bootstrap
+          retention-days: 7
+
+  # ============================================================
+  # Frontend: Lint + Test + Build
+  # ============================================================
+  frontend:
+    runs-on: ubuntu-latest
+    needs: changes
+    if: |
+      needs.changes.outputs.frontend == 'true' || 
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'))
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          # Note: Skipping pnpm cache due to .npmrc env var resolution issues
+          # cache: 'pnpm'
+
+      # Install shared packages from ds-app-resources (when available)
+      # For now, assumes packages are published to npm or fetched from CDN
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Type check
+        run: pnpm typecheck
+
+      - name: Run tests
+        run: pnpm test -- --coverage --passWithNoTests
+
+      - name: Build
+        run: pnpm build
+        env:
+          VITE_API_URL: ''  # Use relative /api path via CloudFront
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build
+          path: frontend/dist
+          retention-days: 7
+
+  # ============================================================
+  # Infrastructure: Validate CDK
+  # ============================================================
+  infra-validate:
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.infra == 'true' || github.event_name == 'workflow_dispatch'
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          # Note: Skipping pnpm cache due to .npmrc env var resolution issues
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Build CDK (TypeScript validation)
+        run: pnpm build
+
+      # Note: Full synth requires backend/frontend artifacts, done at deploy time
+
+  # ============================================================
+  # Deploy Data Stacks (per ecosystem, parallel)
+  # ============================================================
+  deploy-data-stacks-dev:
+    runs-on: ubuntu-latest
+    needs: [detect-environment, parse-ecosystems, fetch-ecosystem-registry, backend, frontend, infra-validate]
+    if: |
+      needs.detect-environment.outputs.environment == 'dev' &&
+      needs.detect-environment.outputs.is_deploy == 'true' &&
+      always() &&
+      (needs.backend.result == 'success' || needs.backend.result == 'skipped') &&
+      (needs.frontend.result == 'success' || needs.frontend.result == 'skipped') &&
+      (needs.infra-validate.result == 'success' || needs.infra-validate.result == 'skipped') &&
+      (needs.fetch-ecosystem-registry.result == 'success') &&
+      (needs.backend.result == 'success' || needs.frontend.result == 'success')
+    environment: development
+    strategy:
+      fail-fast: false  # Failure isolation: one ecosystem failing doesn't stop others
+      max-parallel: 4   # Configurable max parallelism
+      matrix:
+        ecosystem: ${{ fromJson(needs.parse-ecosystems.outputs.enabled_ecosystems) }}
+    outputs:
+      # Collect outputs from all matrix cells
+      stack_outputs: ${{ steps.collect-outputs.outputs.all_outputs }}
+    concurrency:
+      group: deploy-data-dev-${{ matrix.ecosystem }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Download ecosystem config
+        uses: actions/download-artifact@v4
+        with:
+          name: ecosystem-config
+          path: .
+
+      - name: Extract ecosystem registry details
+        id: registry
+        run: |
+          # Extract registry details for this specific ecosystem
+          CONFIG_FILE="combined-ecosystem-config.json"
+          ECOSYSTEM="${{ matrix.ecosystem }}"
+          
+          if [ -f "$CONFIG_FILE" ]; then
+            # Extract registry details for this ecosystem
+            REGISTRY=$(jq -r --arg eco "$ECOSYSTEM" \
+              '.ecosystems | map(select(.name == $eco)) | .[0].registry // {}' \
+              "$CONFIG_FILE")
+            
+            DOMAIN=$(echo "$REGISTRY" | jq -r '.domain // empty')
+            PROD_CERT_ARN=$(echo "$REGISTRY" | jq -r '.prod_cert_arn // empty')
+            DEV_CERT_ARN=$(echo "$REGISTRY" | jq -r '.dev_cert_arn // empty')
+            ROUTE53_ZONE_ID=$(echo "$REGISTRY" | jq -r '.route53_zone_id // empty')
+            SSO_BASE_URL=$(echo "$REGISTRY" | jq -r '.sso_base_url // empty')
+            
+            echo "domain=${DOMAIN}" >> $GITHUB_OUTPUT
+            echo "cert_arn=${DEV_CERT_ARN}" >> $GITHUB_OUTPUT
+            echo "route53_zone_id=${ROUTE53_ZONE_ID}" >> $GITHUB_OUTPUT
+            echo "sso_base_url=${SSO_BASE_URL}" >> $GITHUB_OUTPUT
+            
+            echo "✓ Registry details for ${ECOSYSTEM}: domain=${DOMAIN}"
+          else
+            echo "::warning::Ecosystem config not found, using defaults"
+          fi
+
+      - name: Install CDK dependencies
+        working-directory: infra
+        run: pnpm install --frozen-lockfile
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Deploy Data Stack for ${{ matrix.ecosystem }}
+        id: deploy
+        working-directory: infra
+        continue-on-error: true  # Failure isolation per matrix cell
+        run: |
+          STACK_NAME="${{ env.APP_NAME }}-data-dev-${{ matrix.ecosystem }}"
+          echo "Deploying data stack: ${STACK_NAME}"
+          
+          # Pass ecosystem registry details to CDK via context
+          # stacks context prevents AppStack construction (avoids backend/dist asset errors)
+          npx cdk deploy "${STACK_NAME}" \
+            --context env=dev \
+            --context stacks="${STACK_NAME}" \
+            --context ecosystem=${{ matrix.ecosystem }} \
+            --context ecosystemDomain="${{ steps.registry.outputs.domain }}" \
+            --context ecosystemCertArn="${{ steps.registry.outputs.cert_arn }}" \
+            --context ecosystemRoute53ZoneId="${{ steps.registry.outputs.route53_zone_id }}" \
+            --context ecosystemSsoBaseUrl="${{ steps.registry.outputs.sso_base_url }}" \
+            --exclusively \
+            --require-approval never \
+            --outputs-file "cdk-outputs-${{ matrix.ecosystem }}.json"
+          
+          echo "deploy_status=$?" >> $GITHUB_OUTPUT
+
+      - name: Capture stack outputs
+        id: collect-outputs
+        # Use conclusion (not outcome) to respect continue-on-error masking
+        if: steps.deploy.conclusion == 'success'
+        working-directory: infra
+        run: |
+          OUTPUT_FILE="cdk-outputs-${{ matrix.ecosystem }}.json"
+          if [ -f "$OUTPUT_FILE" ]; then
+            # Extract key outputs for downstream jobs
+            STACK_KEY="${{ env.APP_NAME }}-data-dev-${{ matrix.ecosystem }}"
+            TABLE_NAME=$(jq -r ".\"${STACK_KEY}\".TableName // empty" "$OUTPUT_FILE")
+            TABLE_ARN=$(jq -r ".\"${STACK_KEY}\".TableArn // empty" "$OUTPUT_FILE")
+            BUCKET_NAME=$(jq -r ".\"${STACK_KEY}\".BucketName // empty" "$OUTPUT_FILE")
+            BUCKET_ARN=$(jq -r ".\"${STACK_KEY}\".BucketArn // empty" "$OUTPUT_FILE")
+            
+            # Create JSON object for this ecosystem's outputs (compact to single line for GITHUB_OUTPUT)
+            ECOSYSTEM_OUTPUT=$(jq -c -n \
+              --arg eco "${{ matrix.ecosystem }}" \
+              --arg table "$TABLE_NAME" \
+              --arg tableArn "$TABLE_ARN" \
+              --arg bucket "$BUCKET_NAME" \
+              --arg bucketArn "$BUCKET_ARN" \
+              '{($eco): {tableName: $table, tableArn: $tableArn, bucketName: $bucket, bucketArn: $bucketArn}}')
+            
+            echo "all_outputs=${ECOSYSTEM_OUTPUT}" >> $GITHUB_OUTPUT
+            echo "✓ Captured outputs for ${{ matrix.ecosystem }}: table=${TABLE_NAME}, bucket=${BUCKET_NAME}"
+          else
+            echo "::warning::No outputs file found for ${{ matrix.ecosystem }}"
+            echo "all_outputs={}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload ecosystem outputs
+        # Use conclusion (not outcome) to respect continue-on-error masking
+        if: steps.deploy.conclusion == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: data-stack-outputs-dev-${{ matrix.ecosystem }}
+          path: infra/cdk-outputs-${{ matrix.ecosystem }}.json
+          retention-days: 7
+
+      - name: Report deployment status
+        if: always()
+        run: |
+          if [ "${{ steps.deploy.conclusion }}" = "success" ]; then
+            echo "✅ Data stack for ${{ matrix.ecosystem }} deployed successfully"
+          else
+            echo "❌ Data stack for ${{ matrix.ecosystem }} failed to deploy"
+            echo "::warning::Ecosystem ${{ matrix.ecosystem }} data stack deployment failed"
+          fi
+
+  # ============================================================
+  # Aggregate Data Stack Outputs (for app deployment)
+  # ============================================================
+  aggregate-data-outputs-dev:
+    runs-on: ubuntu-latest
+    needs: [parse-ecosystems, deploy-data-stacks-dev]
+    # Matrix job result check: always() required, then verify non-failure
+    # This handles the case where matrix jobs complete but don't report 'success' directly
+    if: |
+      always() &&
+      needs.deploy-data-stacks-dev.result != 'failure' &&
+      needs.deploy-data-stacks-dev.result != 'cancelled' &&
+      needs.deploy-data-stacks-dev.result != 'skipped'
+    outputs:
+      aggregated_outputs: ${{ steps.aggregate.outputs.all_ecosystems }}
+      successful_ecosystems: ${{ steps.aggregate.outputs.successful }}
+      ecosystem_config_with_data: ${{ steps.merge-data-config.outputs.ecosystem_config }}
+      primary_ecosystem: ${{ steps.merge-data-config.outputs.primary_ecosystem }}
+      all_succeeded: ${{ steps.verify.outputs.all_succeeded }}
+    steps:
+      - name: Download all data stack outputs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: data-stack-outputs-dev-*
+          path: outputs
+          merge-multiple: false
+
+      - name: Download ecosystem config
+        uses: actions/download-artifact@v4
+        with:
+          name: ecosystem-config
+          path: .
+
+      - name: Aggregate outputs
+        id: aggregate
+        run: |
+          # Merge all ecosystem outputs into single JSON
+          AGGREGATED="{}"
+          SUCCESSFUL="[]"
+          
+          for dir in outputs/data-stack-outputs-dev-*/; do
+            if [ -d "$dir" ]; then
+              for file in "$dir"*.json; do
+                if [ -f "$file" ]; then
+                  # Extract ecosystem name from filename
+                  ECOSYSTEM=$(basename "$file" .json | sed 's/cdk-outputs-//')
+                  
+                  # Merge into aggregated object
+                  AGGREGATED=$(echo "$AGGREGATED" | jq --slurpfile new "$file" '. * $new[0]')
+                  
+                  # Add to successful list
+                  SUCCESSFUL=$(echo "$SUCCESSFUL" | jq --arg eco "$ECOSYSTEM" '. + [$eco]')
+                  
+                  echo "✓ Aggregated outputs for ecosystem: $ECOSYSTEM"
+                fi
+              done
+            fi
+          done
+          
+          echo "all_ecosystems=$(echo "$AGGREGATED" | jq -c .)" >> $GITHUB_OUTPUT
+          echo "successful=$(echo "$SUCCESSFUL" | jq -c .)" >> $GITHUB_OUTPUT
+          
+          echo "Aggregated outputs for ecosystems: $(echo "$SUCCESSFUL" | jq -r 'join(", ")')"
+
+      - name: Verify all ecosystems succeeded
+        id: verify
+        run: |
+          ENABLED_ECOSYSTEMS='${{ needs.parse-ecosystems.outputs.enabled_ecosystems }}'
+          SUCCESSFUL='${{ steps.aggregate.outputs.successful }}'
+          
+          ENABLED_COUNT=$(echo "$ENABLED_ECOSYSTEMS" | jq 'length')
+          SUCCESS_COUNT=$(echo "$SUCCESSFUL" | jq 'length')
+          
+          echo "Enabled ecosystems: $ENABLED_COUNT, Successful: $SUCCESS_COUNT"
+          
+          if [ "$ENABLED_COUNT" -ne "$SUCCESS_COUNT" ]; then
+            echo "::error::Not all data stacks deployed successfully"
+            echo "Enabled: $(echo "$ENABLED_ECOSYSTEMS" | jq -r 'join(", ")')"
+            echo "Successful: $(echo "$SUCCESSFUL" | jq -r 'join(", ")')"
+            echo "all_succeeded=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          echo "all_succeeded=true" >> $GITHUB_OUTPUT
+          echo "✓ All $ENABLED_COUNT ecosystem data stacks deployed successfully"
+
+      - name: Merge data outputs into ecosystem config
+        id: merge-data-config
+        run: |
+          CONFIG_FILE="combined-ecosystem-config.json"
+          AGGREGATED='${{ steps.aggregate.outputs.all_ecosystems }}'
+          APP_NAME="${{ env.APP_NAME }}"
+          
+          # Merge data stack outputs into ecosystem config
+          MERGED=$(jq --argjson data "$AGGREGATED" --arg app "$APP_NAME" '
+            .ecosystems = [.ecosystems[] | . as $eco |
+              ($data["\($app)-data-dev-\($eco.name)"] // {}) as $outputs |
+              $eco + {
+                dataResources: {
+                  tableName: $outputs.TableName,
+                  tableArn: $outputs.TableArn,
+                  bucketName: $outputs.BucketName,
+                  bucketArn: $outputs.BucketArn
+                }
+              }
+            ]
+          ' "$CONFIG_FILE")
+          
+          # Extract primary ecosystem (first in list)
+          PRIMARY=$(echo "$MERGED" | jq -r '.ecosystems[0].name // "digistratum"')
+          PRIMARY_DOMAIN=$(echo "$MERGED" | jq -r '.ecosystems[0].registry.domain // "digistratum.com"')
+          
+          echo "ecosystem_config=$(echo "$MERGED" | jq -c .)" >> $GITHUB_OUTPUT
+          echo "primary_ecosystem=$PRIMARY" >> $GITHUB_OUTPUT
+          echo "primary_domain=$PRIMARY_DOMAIN" >> $GITHUB_OUTPUT
+          
+          echo "✓ Merged data resources into ecosystem config"
+          echo "Primary ecosystem: $PRIMARY ($PRIMARY_DOMAIN)"
+
+  # ============================================================
+  # Deploy to Dev (develop branch)
+  # ============================================================
+  deploy-dev:
+    runs-on: ubuntu-latest
+    needs: [detect-environment, fetch-ecosystem-registry, backend, frontend, infra-validate, aggregate-data-outputs-dev]
+    # App stack deploys ONLY after ALL data stacks succeed
+    if: |
+      needs.detect-environment.outputs.environment == 'dev' &&
+      always() &&
+      needs.aggregate-data-outputs-dev.result != 'failure' &&
+      needs.aggregate-data-outputs-dev.result != 'cancelled' &&
+      needs.aggregate-data-outputs-dev.result != 'skipped' &&
+      (needs.backend.result == 'success' || needs.backend.result == 'skipped') &&
+      (needs.frontend.result == 'success' || needs.frontend.result == 'skipped') &&
+      (needs.infra-validate.result == 'success' || needs.infra-validate.result == 'skipped') &&
+      (needs.backend.result == 'success' || needs.frontend.result == 'success')
+    environment: development
+    concurrency:
+      group: deploy-dev
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Download backend artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-binary
+          path: backend/dist
+        continue-on-error: true
+
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-build
+          path: frontend/dist
+        continue-on-error: true
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install CDK dependencies
+        working-directory: infra
+        run: pnpm install --frozen-lockfile
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Determine stack name and ecosystem config
+        id: stack-config
+        run: |
+          # Use ecosystem config with merged data resources from aggregate job
+          ECOSYSTEM_CONFIG='${{ needs.aggregate-data-outputs-dev.outputs.ecosystem_config_with_data }}'
+          SUCCESSFUL_ECOSYSTEMS='${{ needs.aggregate-data-outputs-dev.outputs.successful_ecosystems }}'
+          PRIMARY_ECOSYSTEM='${{ needs.aggregate-data-outputs-dev.outputs.primary_ecosystem }}'
+          
+          ECO_COUNT=$(echo "$SUCCESSFUL_ECOSYSTEMS" | jq 'length')
+          
+          # Unified stack naming: always use {app}-app-{env} pattern (#1905)
+          STACK_NAME="${{ env.APP_NAME }}-app-dev"
+          echo "Deploying ${STACK_NAME} with $ECO_COUNT ecosystem(s)"
+          
+          # Get primary ecosystem domain for health check
+          PRIMARY_DOMAIN=$(echo "$ECOSYSTEM_CONFIG" | jq -r '.ecosystems[0].registry.domain // "digistratum.com"')
+          
+          echo "stack_name=${STACK_NAME}" >> $GITHUB_OUTPUT
+          echo "ecosystem_config=${ECOSYSTEM_CONFIG}" >> $GITHUB_OUTPUT
+          echo "primary_domain=${PRIMARY_DOMAIN}" >> $GITHUB_OUTPUT
+          echo "ecosystems_deployed=$(echo "$SUCCESSFUL_ECOSYSTEMS" | jq -r 'join(", ")')" >> $GITHUB_OUTPUT
+
+      - name: Deploy App Stack
+        id: deploy
+        working-directory: infra
+        run: |
+          echo "🚀 Deploying app stack with ecosystems: ${{ steps.stack-config.outputs.ecosystems_deployed }}"
+          
+          # Pass ecosystem config with data resources to CDK
+          ECOSYSTEM_CONFIG='${{ steps.stack-config.outputs.ecosystem_config }}'
+          
+          npx cdk deploy ${{ steps.stack-config.outputs.stack_name }} \
+            --context env=dev \
+            --context ecosystemConfig="${ECOSYSTEM_CONFIG}" \
+            --require-approval never \
+            --outputs-file cdk-outputs.json
+          
+          echo "✓ App stack deployed successfully"
+
+      - name: Deploy frontend to S3
+        run: |
+          # Extract bucket name - try cdk-outputs.json first, fall back to CloudFormation
+          STACK_NAME="${{ steps.stack-config.outputs.stack_name }}"
+          
+          if [ -f "infra/cdk-outputs.json" ]; then
+            echo "Reading outputs from cdk-outputs.json..."
+            BUCKET_NAME=$(jq -r ".\"${STACK_NAME}\".FrontendBucketName // empty" infra/cdk-outputs.json)
+            CLOUDFRONT_ID=$(jq -r ".\"${STACK_NAME}\".CloudFrontDistributionId // empty" infra/cdk-outputs.json)
+          fi
+          
+          # Fall back to CloudFormation describe-stacks if file missing or empty
+          if [ -z "$BUCKET_NAME" ]; then
+            echo "Falling back to CloudFormation describe-stacks..."
+            BUCKET_NAME=$(aws cloudformation describe-stacks \
+              --stack-name "$STACK_NAME" \
+              --query "Stacks[0].Outputs[?OutputKey=='FrontendBucketName'].OutputValue" \
+              --output text)
+            CLOUDFRONT_ID=$(aws cloudformation describe-stacks \
+              --stack-name "$STACK_NAME" \
+              --query "Stacks[0].Outputs[?OutputKey=='CloudFrontDistributionId'].OutputValue" \
+              --output text)
+          fi
+          
+          if [ -z "$BUCKET_NAME" ] || [ "$BUCKET_NAME" = "None" ]; then
+            echo "::error::Could not determine frontend bucket name from CDK outputs or CloudFormation"
+            echo "STACK_NAME: ${STACK_NAME}"
+            exit 1
+          fi
+          echo "Deploying frontend to s3://${BUCKET_NAME}..."
+          aws s3 sync frontend/dist "s3://${BUCKET_NAME}" \
+            --delete \
+            --cache-control "public, max-age=31536000, immutable" \
+            --exclude "index.html" \
+            --exclude "*.json"
+          
+          # index.html with short cache
+          aws s3 cp frontend/dist/index.html "s3://${BUCKET_NAME}/index.html" \
+            --cache-control "public, max-age=60"
+          
+          # Config files with no cache
+          if [ -f frontend/dist/config.json ]; then
+            aws s3 cp frontend/dist/config.json "s3://${BUCKET_NAME}/config.json" \
+              --cache-control "no-cache"
+          fi
+          
+          echo "✓ Frontend deployed to S3"
+          
+          # Invalidate CloudFront cache
+          if [ -n "$CLOUDFRONT_ID" ]; then
+            echo "Invalidating CloudFront cache for ${CLOUDFRONT_ID}..."
+            aws cloudfront create-invalidation \
+              --distribution-id "$CLOUDFRONT_ID" \
+              --paths "/*" \
+              --query 'Invalidation.Id' \
+              --output text
+            echo "✓ CloudFront invalidation started"
+          fi
+
+      - name: Health check (primary ecosystem)
+        run: |
+          MAX_RETRIES=10
+          RETRY_DELAY=30
+          PRIMARY_DOMAIN="${{ steps.stack-config.outputs.primary_domain }}"
+          HEALTH_URL="https://${{ env.APP_NAME }}.dev.${PRIMARY_DOMAIN}/api/health"
+          
+          echo "Checking health at ${HEALTH_URL}..."
+          
+          for i in $(seq 1 $MAX_RETRIES); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$HEALTH_URL" || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ Health check passed for primary ecosystem (${PRIMARY_DOMAIN})"
+              exit 0
+            fi
+            echo "Attempt $i/$MAX_RETRIES: Health check returned $STATUS, retrying in ${RETRY_DELAY}s..."
+            sleep $RETRY_DELAY
+          done
+          echo "❌ Health check failed after $MAX_RETRIES attempts"
+          exit 1
+
+      - name: Deployment Summary
+        if: always()
+        run: |
+          echo "## 📦 Deployment Summary - Dev" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Stack** | \`${{ steps.stack-config.outputs.stack_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Ecosystems** | ${{ steps.stack-config.outputs.ecosystems_deployed }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Primary Domain** | ${{ steps.stack-config.outputs.primary_domain }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Status** | ${{ steps.deploy.outcome == 'success' && '✅ Success' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # List configured ecosystem domains
+          echo "### Configured Ecosystem Domains" >> $GITHUB_STEP_SUMMARY
+          ECOSYSTEM_CONFIG='${{ steps.stack-config.outputs.ecosystem_config }}'
+          echo "$ECOSYSTEM_CONFIG" | jq -r '.ecosystems[] | "- **\(.name)**: \(.registry.domain // "N/A")"' >> $GITHUB_STEP_SUMMARY
+
+  # ============================================================
+  # Deploy Data Stacks (per ecosystem, parallel) - Production
+  # ============================================================
+  deploy-data-stacks-prod:
+    runs-on: ubuntu-latest
+    needs: [detect-environment, parse-ecosystems, fetch-ecosystem-registry, backend, frontend, infra-validate]
+    if: |
+      needs.detect-environment.outputs.environment == 'prod' &&
+      needs.detect-environment.outputs.is_deploy == 'true' &&
+      always() &&
+      (needs.backend.result == 'success' || needs.backend.result == 'skipped') &&
+      (needs.frontend.result == 'success' || needs.frontend.result == 'skipped') &&
+      (needs.infra-validate.result == 'success' || needs.infra-validate.result == 'skipped') &&
+      (needs.fetch-ecosystem-registry.result == 'success') &&
+      (needs.backend.result == 'success' || needs.frontend.result == 'success')
+    environment: production
+    strategy:
+      fail-fast: false  # Failure isolation: one ecosystem failing doesn't stop others
+      max-parallel: 4   # Configurable max parallelism
+      matrix:
+        ecosystem: ${{ fromJson(needs.parse-ecosystems.outputs.enabled_ecosystems) }}
+    outputs:
+      stack_outputs: ${{ steps.collect-outputs.outputs.all_outputs }}
+    concurrency:
+      group: deploy-data-prod-${{ matrix.ecosystem }}
+      cancel-in-progress: false  # Never cancel prod deploys
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Download ecosystem config
+        uses: actions/download-artifact@v4
+        with:
+          name: ecosystem-config
+          path: .
+
+      - name: Extract ecosystem registry details
+        id: registry
+        run: |
+          # Extract registry details for this specific ecosystem
+          CONFIG_FILE="combined-ecosystem-config.json"
+          ECOSYSTEM="${{ matrix.ecosystem }}"
+          
+          if [ -f "$CONFIG_FILE" ]; then
+            # Extract registry details for this ecosystem
+            REGISTRY=$(jq -r --arg eco "$ECOSYSTEM" \
+              '.ecosystems | map(select(.name == $eco)) | .[0].registry // {}' \
+              "$CONFIG_FILE")
+            
+            DOMAIN=$(echo "$REGISTRY" | jq -r '.domain // empty')
+            PROD_CERT_ARN=$(echo "$REGISTRY" | jq -r '.prod_cert_arn // empty')
+            DEV_CERT_ARN=$(echo "$REGISTRY" | jq -r '.dev_cert_arn // empty')
+            ROUTE53_ZONE_ID=$(echo "$REGISTRY" | jq -r '.route53_zone_id // empty')
+            SSO_BASE_URL=$(echo "$REGISTRY" | jq -r '.sso_base_url // empty')
+            
+            echo "domain=${DOMAIN}" >> $GITHUB_OUTPUT
+            echo "cert_arn=${PROD_CERT_ARN}" >> $GITHUB_OUTPUT
+            echo "route53_zone_id=${ROUTE53_ZONE_ID}" >> $GITHUB_OUTPUT
+            echo "sso_base_url=${SSO_BASE_URL}" >> $GITHUB_OUTPUT
+            
+            echo "✓ Registry details for ${ECOSYSTEM}: domain=${DOMAIN}"
+          else
+            echo "::warning::Ecosystem config not found, using defaults"
+          fi
+
+      - name: Install CDK dependencies
+        working-directory: infra
+        run: pnpm install --frozen-lockfile
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Deploy Data Stack for ${{ matrix.ecosystem }}
+        id: deploy
+        working-directory: infra
+        continue-on-error: true  # Failure isolation per matrix cell
+        run: |
+          STACK_NAME="${{ env.APP_NAME }}-data-prod-${{ matrix.ecosystem }}"
+          echo "Deploying data stack: ${STACK_NAME}"
+          
+          # Pass ecosystem registry details to CDK via context
+          # stacks context prevents AppStack construction (avoids backend/dist asset errors)
+          npx cdk deploy "${STACK_NAME}" \
+            --context env=prod \
+            --context stacks="${STACK_NAME}" \
+            --context ecosystem=${{ matrix.ecosystem }} \
+            --context ecosystemDomain="${{ steps.registry.outputs.domain }}" \
+            --context ecosystemCertArn="${{ steps.registry.outputs.cert_arn }}" \
+            --context ecosystemRoute53ZoneId="${{ steps.registry.outputs.route53_zone_id }}" \
+            --context ecosystemSsoBaseUrl="${{ steps.registry.outputs.sso_base_url }}" \
+            --exclusively \
+            --require-approval never \
+            --outputs-file "cdk-outputs-${{ matrix.ecosystem }}.json"
+          
+          echo "deploy_status=$?" >> $GITHUB_OUTPUT
+
+      - name: Capture stack outputs
+        id: collect-outputs
+        # Use conclusion (not outcome) to respect continue-on-error masking
+        if: steps.deploy.conclusion == 'success'
+        working-directory: infra
+        run: |
+          OUTPUT_FILE="cdk-outputs-${{ matrix.ecosystem }}.json"
+          if [ -f "$OUTPUT_FILE" ]; then
+            STACK_KEY="${{ env.APP_NAME }}-data-prod-${{ matrix.ecosystem }}"
+            TABLE_NAME=$(jq -r ".\"${STACK_KEY}\".TableName // empty" "$OUTPUT_FILE")
+            TABLE_ARN=$(jq -r ".\"${STACK_KEY}\".TableArn // empty" "$OUTPUT_FILE")
+            BUCKET_NAME=$(jq -r ".\"${STACK_KEY}\".BucketName // empty" "$OUTPUT_FILE")
+            BUCKET_ARN=$(jq -r ".\"${STACK_KEY}\".BucketArn // empty" "$OUTPUT_FILE")
+            
+            # Create JSON object for this ecosystem's outputs (compact to single line for GITHUB_OUTPUT)
+            ECOSYSTEM_OUTPUT=$(jq -c -n \
+              --arg eco "${{ matrix.ecosystem }}" \
+              --arg table "$TABLE_NAME" \
+              --arg tableArn "$TABLE_ARN" \
+              --arg bucket "$BUCKET_NAME" \
+              --arg bucketArn "$BUCKET_ARN" \
+              '{($eco): {tableName: $table, tableArn: $tableArn, bucketName: $bucket, bucketArn: $bucketArn}}')
+            
+            echo "all_outputs=${ECOSYSTEM_OUTPUT}" >> $GITHUB_OUTPUT
+            echo "✓ Captured outputs for ${{ matrix.ecosystem }}: table=${TABLE_NAME}, bucket=${BUCKET_NAME}"
+          else
+            echo "::warning::No outputs file found for ${{ matrix.ecosystem }}"
+            echo "all_outputs={}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload ecosystem outputs
+        # Use conclusion (not outcome) to respect continue-on-error masking
+        if: steps.deploy.conclusion == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: data-stack-outputs-prod-${{ matrix.ecosystem }}
+          path: infra/cdk-outputs-${{ matrix.ecosystem }}.json
+          retention-days: 7
+
+      - name: Report deployment status
+        if: always()
+        run: |
+          if [ "${{ steps.deploy.conclusion }}" = "success" ]; then
+            echo "✅ Data stack for ${{ matrix.ecosystem }} deployed successfully"
+          else
+            echo "❌ Data stack for ${{ matrix.ecosystem }} failed to deploy"
+            echo "::warning::Ecosystem ${{ matrix.ecosystem }} data stack deployment failed"
+          fi
+
+  # ============================================================
+  # Aggregate Data Stack Outputs (for app deployment) - Production
+  # ============================================================
+  aggregate-data-outputs-prod:
+    runs-on: ubuntu-latest
+    needs: [parse-ecosystems, deploy-data-stacks-prod]
+    # Matrix job result check: always() required, then verify non-failure
+    # This handles the case where matrix jobs complete but don't report 'success' directly
+    if: |
+      always() &&
+      needs.deploy-data-stacks-prod.result != 'failure' &&
+      needs.deploy-data-stacks-prod.result != 'cancelled' &&
+      needs.deploy-data-stacks-prod.result != 'skipped'
+    outputs:
+      aggregated_outputs: ${{ steps.aggregate.outputs.all_ecosystems }}
+      successful_ecosystems: ${{ steps.aggregate.outputs.successful }}
+      ecosystem_config_with_data: ${{ steps.merge-data-config.outputs.ecosystem_config }}
+      primary_ecosystem: ${{ steps.merge-data-config.outputs.primary_ecosystem }}
+      all_succeeded: ${{ steps.verify.outputs.all_succeeded }}
+    steps:
+      - name: Download all data stack outputs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: data-stack-outputs-prod-*
+          path: outputs
+          merge-multiple: false
+
+      - name: Download ecosystem config
+        uses: actions/download-artifact@v4
+        with:
+          name: ecosystem-config
+          path: .
+
+      - name: Aggregate outputs
+        id: aggregate
+        run: |
+          AGGREGATED="{}"
+          SUCCESSFUL="[]"
+          
+          for dir in outputs/data-stack-outputs-prod-*/; do
+            if [ -d "$dir" ]; then
+              for file in "$dir"*.json; do
+                if [ -f "$file" ]; then
+                  ECOSYSTEM=$(basename "$file" .json | sed 's/cdk-outputs-//')
+                  AGGREGATED=$(echo "$AGGREGATED" | jq --slurpfile new "$file" '. * $new[0]')
+                  SUCCESSFUL=$(echo "$SUCCESSFUL" | jq --arg eco "$ECOSYSTEM" '. + [$eco]')
+                  echo "✓ Aggregated outputs for ecosystem: $ECOSYSTEM"
+                fi
+              done
+            fi
+          done
+          
+          echo "all_ecosystems=$(echo "$AGGREGATED" | jq -c .)" >> $GITHUB_OUTPUT
+          echo "successful=$(echo "$SUCCESSFUL" | jq -c .)" >> $GITHUB_OUTPUT
+          
+          echo "Aggregated outputs for ecosystems: $(echo "$SUCCESSFUL" | jq -r 'join(", ")')"
+
+      - name: Verify all ecosystems succeeded
+        id: verify
+        run: |
+          ENABLED_ECOSYSTEMS='${{ needs.parse-ecosystems.outputs.enabled_ecosystems }}'
+          SUCCESSFUL='${{ steps.aggregate.outputs.successful }}'
+          
+          ENABLED_COUNT=$(echo "$ENABLED_ECOSYSTEMS" | jq 'length')
+          SUCCESS_COUNT=$(echo "$SUCCESSFUL" | jq 'length')
+          
+          echo "Enabled ecosystems: $ENABLED_COUNT, Successful: $SUCCESS_COUNT"
+          
+          if [ "$ENABLED_COUNT" -ne "$SUCCESS_COUNT" ]; then
+            echo "::error::Not all production data stacks deployed successfully"
+            echo "Enabled: $(echo "$ENABLED_ECOSYSTEMS" | jq -r 'join(", ")')"
+            echo "Successful: $(echo "$SUCCESSFUL" | jq -r 'join(", ")')"
+            echo "all_succeeded=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          echo "all_succeeded=true" >> $GITHUB_OUTPUT
+          echo "✓ All $ENABLED_COUNT ecosystem data stacks deployed successfully"
+
+      - name: Merge data outputs into ecosystem config
+        id: merge-data-config
+        run: |
+          CONFIG_FILE="combined-ecosystem-config.json"
+          AGGREGATED='${{ steps.aggregate.outputs.all_ecosystems }}'
+          APP_NAME="${{ env.APP_NAME }}"
+          
+          # Merge data stack outputs into ecosystem config
+          MERGED=$(jq --argjson data "$AGGREGATED" --arg app "$APP_NAME" '
+            .ecosystems = [.ecosystems[] | . as $eco |
+              ($data["\($app)-data-prod-\($eco.name)"] // {}) as $outputs |
+              $eco + {
+                dataResources: {
+                  tableName: $outputs.TableName,
+                  tableArn: $outputs.TableArn,
+                  bucketName: $outputs.BucketName,
+                  bucketArn: $outputs.BucketArn
+                }
+              }
+            ]
+          ' "$CONFIG_FILE")
+          
+          # Extract primary ecosystem (first in list)
+          PRIMARY=$(echo "$MERGED" | jq -r '.ecosystems[0].name // "digistratum"')
+          PRIMARY_DOMAIN=$(echo "$MERGED" | jq -r '.ecosystems[0].registry.domain // "digistratum.com"')
+          
+          echo "ecosystem_config=$(echo "$MERGED" | jq -c .)" >> $GITHUB_OUTPUT
+          echo "primary_ecosystem=$PRIMARY" >> $GITHUB_OUTPUT
+          echo "primary_domain=$PRIMARY_DOMAIN" >> $GITHUB_OUTPUT
+          
+          echo "✓ Merged data resources into ecosystem config"
+          echo "Primary ecosystem: $PRIMARY ($PRIMARY_DOMAIN)"
+
+  # ============================================================
+  # Deploy to Production (main branch)
+  # ============================================================
+  deploy-prod:
+    runs-on: ubuntu-latest
+    needs: [detect-environment, fetch-ecosystem-registry, backend, frontend, infra-validate, aggregate-data-outputs-prod]
+    # App stack deploys ONLY after ALL data stacks succeed
+    if: |
+      needs.detect-environment.outputs.environment == 'prod' &&
+      always() &&
+      needs.aggregate-data-outputs-prod.result != 'failure' &&
+      needs.aggregate-data-outputs-prod.result != 'cancelled' &&
+      needs.aggregate-data-outputs-prod.result != 'skipped' &&
+      (needs.backend.result == 'success' || needs.backend.result == 'skipped') &&
+      (needs.frontend.result == 'success' || needs.frontend.result == 'skipped') &&
+      (needs.infra-validate.result == 'success' || needs.infra-validate.result == 'skipped') &&
+      (needs.backend.result == 'success' || needs.frontend.result == 'success')
+    environment: production
+    concurrency:
+      group: deploy-prod
+      cancel-in-progress: false  # Never cancel prod deploys
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Download backend artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-binary
+          path: backend/dist
+        continue-on-error: true
+
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-build
+          path: frontend/dist
+        continue-on-error: true
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install CDK dependencies
+        working-directory: infra
+        run: pnpm install --frozen-lockfile
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Determine stack name and ecosystem config
+        id: stack-config
+        run: |
+          # Use ecosystem config with merged data resources from aggregate job
+          ECOSYSTEM_CONFIG='${{ needs.aggregate-data-outputs-prod.outputs.ecosystem_config_with_data }}'
+          SUCCESSFUL_ECOSYSTEMS='${{ needs.aggregate-data-outputs-prod.outputs.successful_ecosystems }}'
+          PRIMARY_ECOSYSTEM='${{ needs.aggregate-data-outputs-prod.outputs.primary_ecosystem }}'
+          
+          ECO_COUNT=$(echo "$SUCCESSFUL_ECOSYSTEMS" | jq 'length')
+          
+          # Unified stack naming: always use {app}-app-{env} pattern (#1905)
+          STACK_NAME="${{ env.APP_NAME }}-app-prod"
+          echo "Deploying ${STACK_NAME} with $ECO_COUNT ecosystem(s)"
+          
+          # Get primary ecosystem domain for health check
+          PRIMARY_DOMAIN=$(echo "$ECOSYSTEM_CONFIG" | jq -r '.ecosystems[0].registry.domain // "digistratum.com"')
+          
+          echo "stack_name=${STACK_NAME}" >> $GITHUB_OUTPUT
+          echo "ecosystem_config=${ECOSYSTEM_CONFIG}" >> $GITHUB_OUTPUT
+          echo "primary_domain=${PRIMARY_DOMAIN}" >> $GITHUB_OUTPUT
+          echo "ecosystems_deployed=$(echo "$SUCCESSFUL_ECOSYSTEMS" | jq -r 'join(", ")')" >> $GITHUB_OUTPUT
+
+      - name: Deploy App Stack
+        id: deploy
+        working-directory: infra
+        run: |
+          echo "🚀 Deploying production app stack with ecosystems: ${{ steps.stack-config.outputs.ecosystems_deployed }}"
+          
+          # Pass ecosystem config with data resources to CDK
+          ECOSYSTEM_CONFIG='${{ steps.stack-config.outputs.ecosystem_config }}'
+          
+          npx cdk deploy ${{ steps.stack-config.outputs.stack_name }} \
+            --context env=prod \
+            --context ecosystemConfig="${ECOSYSTEM_CONFIG}" \
+            --require-approval never \
+            --outputs-file cdk-outputs.json
+          
+          echo "✓ App stack deployed successfully"
+
+      - name: Deploy frontend to S3
+        run: |
+          # Extract bucket name - try cdk-outputs.json first, fall back to CloudFormation
+          STACK_NAME="${{ steps.stack-config.outputs.stack_name }}"
+          
+          if [ -f "infra/cdk-outputs.json" ]; then
+            echo "Reading outputs from cdk-outputs.json..."
+            BUCKET_NAME=$(jq -r ".\"${STACK_NAME}\".FrontendBucketName // empty" infra/cdk-outputs.json)
+            CLOUDFRONT_ID=$(jq -r ".\"${STACK_NAME}\".CloudFrontDistributionId // empty" infra/cdk-outputs.json)
+          fi
+          
+          # Fall back to CloudFormation describe-stacks if file missing or empty
+          if [ -z "$BUCKET_NAME" ]; then
+            echo "Falling back to CloudFormation describe-stacks..."
+            BUCKET_NAME=$(aws cloudformation describe-stacks \
+              --stack-name "$STACK_NAME" \
+              --query "Stacks[0].Outputs[?OutputKey=='FrontendBucketName'].OutputValue" \
+              --output text)
+            CLOUDFRONT_ID=$(aws cloudformation describe-stacks \
+              --stack-name "$STACK_NAME" \
+              --query "Stacks[0].Outputs[?OutputKey=='CloudFrontDistributionId'].OutputValue" \
+              --output text)
+          fi
+          
+          if [ -z "$BUCKET_NAME" ] || [ "$BUCKET_NAME" = "None" ]; then
+            echo "::error::Could not determine frontend bucket name from CDK outputs or CloudFormation"
+            echo "STACK_NAME: ${STACK_NAME}"
+            exit 1
+          fi
+          
+          echo "Deploying frontend to s3://${BUCKET_NAME}..."
+          aws s3 sync frontend/dist "s3://${BUCKET_NAME}" \
+            --delete \
+            --cache-control "public, max-age=31536000, immutable" \
+            --exclude "index.html" \
+            --exclude "*.json"
+          
+          # index.html with short cache
+          aws s3 cp frontend/dist/index.html "s3://${BUCKET_NAME}/index.html" \
+            --cache-control "public, max-age=60"
+          
+          # Config files with no cache
+          if [ -f frontend/dist/config.json ]; then
+            aws s3 cp frontend/dist/config.json "s3://${BUCKET_NAME}/config.json" \
+              --cache-control "no-cache"
+          fi
+          
+          echo "✓ Frontend deployed to S3"
+          
+          # Invalidate CloudFront cache
+          if [ -n "$CLOUDFRONT_ID" ]; then
+            echo "Invalidating CloudFront cache for ${CLOUDFRONT_ID}..."
+            aws cloudfront create-invalidation \
+              --distribution-id "$CLOUDFRONT_ID" \
+              --paths "/*" \
+              --query 'Invalidation.Id' \
+              --output text
+            echo "✓ CloudFront invalidation started"
+          fi
+
+      # ============================================================
+      # Post-Deploy Verification (Production)
+      # ============================================================
+      - name: Verify CloudFormation stack status
+        run: |
+          STACK_NAME="${{ steps.stack-config.outputs.stack_name }}"
+          STACK_STATUS=$(aws cloudformation describe-stacks \
+            --stack-name "${STACK_NAME}" \
+            --query 'Stacks[0].StackStatus' \
+            --output text 2>/dev/null || echo "UNKNOWN")
+          
+          echo "Stack status: ${STACK_STATUS}"
+          
+          if [[ "$STACK_STATUS" == *"ROLLBACK"* ]] || [[ "$STACK_STATUS" == "FAILED" ]]; then
+            echo "::error::Stack is in failed/rollback state: ${STACK_STATUS}"
+            exit 1
+          fi
+
+      - name: Verify frontend assets deployed
+        run: |
+          # Use CloudFront URL from CDK outputs for verification
+          STACK_NAME="${{ steps.stack-config.outputs.stack_name }}"
+          CLOUDFRONT_URL=$(jq -r ".\"${STACK_NAME}\".CloudFrontUrl // empty" infra/cdk-outputs.json)
+          
+          if [ -z "$CLOUDFRONT_URL" ]; then
+            echo "::warning::CloudFront URL not found in outputs, skipping frontend verification"
+            exit 0
+          fi
+          
+          echo "Checking frontend assets at ${CLOUDFRONT_URL}..."
+          
+          # Wait a moment for S3 sync and CloudFront propagation
+          sleep 10
+          
+          RESPONSE=$(curl -s "${CLOUDFRONT_URL}/index.html")
+          
+          if [ -z "$RESPONSE" ]; then
+            echo "::warning::Could not fetch index.html (may still be propagating)"
+            exit 0
+          fi
+          
+          # Extract and verify JS bundle
+          JS_FILE=$(echo "$RESPONSE" | grep -oE 'src="/assets/index-[^"]+\.js"' | head -1 | sed 's/src="//;s/"//')
+          
+          if [ -n "$JS_FILE" ]; then
+            JS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${CLOUDFRONT_URL}${JS_FILE}")
+            if [ "$JS_STATUS" != "200" ]; then
+              echo "::warning::JS bundle not found (HTTP $JS_STATUS), may still be propagating"
+            else
+              echo "✓ JS bundle verified"
+            fi
+          fi
+          
+          echo "✓ Frontend verification complete"
+
+      - name: Health check (primary ecosystem)
+        run: |
+          MAX_RETRIES=10
+          RETRY_DELAY=30
+          PRIMARY_DOMAIN="${{ steps.stack-config.outputs.primary_domain }}"
+          HEALTH_URL="https://${{ env.APP_NAME }}.${PRIMARY_DOMAIN}/api/health"
+          
+          echo "Checking health at ${HEALTH_URL}..."
+          
+          for i in $(seq 1 $MAX_RETRIES); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$HEALTH_URL" || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ Health check passed for primary ecosystem (${PRIMARY_DOMAIN})"
+              exit 0
+            fi
+            echo "Attempt $i/$MAX_RETRIES: Health check returned $STATUS, retrying in ${RETRY_DELAY}s..."
+            sleep $RETRY_DELAY
+          done
+          echo "❌ Health check failed after $MAX_RETRIES attempts"
+          exit 1
+
+      - name: Deployment Summary
+        if: always()
+        run: |
+          echo "## 🚀 Deployment Summary - Production" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Stack** | \`${{ steps.stack-config.outputs.stack_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Ecosystems** | ${{ steps.stack-config.outputs.ecosystems_deployed }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Primary Domain** | ${{ steps.stack-config.outputs.primary_domain }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Status** | ${{ steps.deploy.outcome == 'success' && '✅ Success' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # List configured ecosystem domains
+          echo "### Configured Ecosystem Domains" >> $GITHUB_STEP_SUMMARY
+          ECOSYSTEM_CONFIG='${{ steps.stack-config.outputs.ecosystem_config }}'
+          echo "$ECOSYSTEM_CONFIG" | jq -r '.ecosystems[] | "- **\(.name)**: \(.registry.domain // "N/A")"' >> $GITHUB_STEP_SUMMARY
+
+  # Manifest check - ensure all files have clear ownership
+  manifest-check:
+    needs: template-check
+    if: needs.template-check.outputs.is_template != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Check manifest coverage
+        working-directory: tools
+        run: go run ./cmd/check-manifest --strict

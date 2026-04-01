@@ -1,0 +1,574 @@
+# Production Smoke Tests with Automatic Rollback
+# Runs after successful prod deployment to validate critical paths
+#
+# Trigger: After CI/CD workflow completes for main branch
+# On failure: Rolls back Lambda to previous version and alerts
+#
+# Required GitHub Secrets:
+#   AWS_ROLE_ARN           - OIDC role for AWS operations
+#   SLACK_WEBHOOK_URL      - (optional) For failure alerts
+#   E2E_TEST_USER_EMAIL    - Test user for authenticated smoke tests
+#   E2E_TEST_USER_PASSWORD - Test user password
+#
+# Related:
+#   - e2e-dev.yml: Full E2E suite for dev (blocks promotion)
+#   - docs/CI_CD.md: Pipeline documentation
+
+name: Smoke Tests (Prod)
+
+on:
+  # Trigger after CI/CD workflow completes for main branch
+  workflow_run:
+    workflows: ["CI/CD"]
+    types: [completed]
+    branches: [main]
+
+  # Allow manual triggering for debugging
+  workflow_dispatch:
+    inputs:
+      app_url:
+        description: 'Production URL to test against'
+        required: false
+        type: string
+      skip_rollback:
+        description: 'Skip rollback on failure (dry run)'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  NODE_VERSION: '20'
+  PNPM_VERSION: '8'
+  AWS_REGION: 'us-west-2'
+  APP_NAME: 'ds-noc-v2'  # Replaced by create-app.sh
+
+permissions:
+  id-token: write   # Required for OIDC
+  statuses: write
+  contents: read
+  actions: read
+
+jobs:
+  # ============================================================
+  # Template Detection - Skip for ds-app-template itself
+  # ============================================================
+  template-check:
+    runs-on: ubuntu-latest
+    outputs:
+      is_template: ${{ steps.check.outputs.is_template }}
+    steps:
+      - name: Check if running on template repo
+        id: check
+        run: |
+          if [[ "${{ github.repository }}" == *"ds-app-template"* ]]; then
+            echo "is_template=true" >> $GITHUB_OUTPUT
+            echo "⚠️ This is ds-app-template - smoke tests will be skipped"
+          else
+            echo "is_template=false" >> $GITHUB_OUTPUT
+          fi
+
+  # ============================================================
+  # Check if triggering workflow was successful
+  # ============================================================
+  check-trigger:
+    needs: template-check
+    if: needs.template-check.outputs.is_template != 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+      app_url: ${{ steps.check.outputs.app_url }}
+      commit_sha: ${{ steps.check.outputs.commit_sha }}
+      stack_name: ${{ steps.check.outputs.stack_name }}
+    steps:
+      - name: Check workflow_run trigger
+        id: check
+        run: |
+          EVENT="${{ github.event_name }}"
+          
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            # Manual trigger - always run
+            APP_URL="${{ github.event.inputs.app_url }}"
+            if [ -z "$APP_URL" ]; then
+              # Default to prod domain pattern
+              APP_URL="https://${{ env.APP_NAME }}.digistratum.com"
+            fi
+            echo "should_run=true" >> $GITHUB_OUTPUT
+            echo "app_url=${APP_URL}" >> $GITHUB_OUTPUT
+            echo "commit_sha=${{ github.sha }}" >> $GITHUB_OUTPUT
+            echo "stack_name=${{ env.APP_NAME }}-prod" >> $GITHUB_OUTPUT
+            echo "✓ Manual trigger - testing ${APP_URL}"
+          elif [ "$EVENT" = "workflow_run" ]; then
+            # Check if CI/CD workflow succeeded
+            CONCLUSION="${{ github.event.workflow_run.conclusion }}"
+            BRANCH="${{ github.event.workflow_run.head_branch }}"
+            SHA="${{ github.event.workflow_run.head_sha }}"
+            
+            echo "CI/CD conclusion: ${CONCLUSION}"
+            echo "Branch: ${BRANCH}"
+            echo "Commit: ${SHA}"
+            
+            if [ "$CONCLUSION" = "success" ] && [ "$BRANCH" = "main" ]; then
+              APP_URL="https://${{ env.APP_NAME }}.digistratum.com"
+              echo "should_run=true" >> $GITHUB_OUTPUT
+              echo "app_url=${APP_URL}" >> $GITHUB_OUTPUT
+              echo "commit_sha=${SHA}" >> $GITHUB_OUTPUT
+              echo "stack_name=${{ env.APP_NAME }}-prod" >> $GITHUB_OUTPUT
+              echo "✓ CI/CD succeeded - will run smoke tests against ${APP_URL}"
+            else
+              echo "should_run=false" >> $GITHUB_OUTPUT
+              echo "⏭️ Skipping smoke tests - CI/CD did not succeed or wrong branch"
+            fi
+          fi
+
+  # ============================================================
+  # Capture Pre-Deployment Lambda Version (for rollback)
+  # ============================================================
+  capture-version:
+    needs: check-trigger
+    if: needs.check-trigger.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      previous_version: ${{ steps.version.outputs.previous_version }}
+      current_version: ${{ steps.version.outputs.current_version }}
+      function_name: ${{ steps.version.outputs.function_name }}
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get Lambda version info
+        id: version
+        run: |
+          STACK_NAME="${{ needs.check-trigger.outputs.stack_name }}"
+          
+          # Get Lambda function name from CloudFormation stack outputs
+          FUNCTION_NAME=$(aws cloudformation describe-stacks \
+            --stack-name "${STACK_NAME}" \
+            --query 'Stacks[0].Outputs[?OutputKey==`LambdaFunctionName`].OutputValue' \
+            --output text 2>/dev/null || echo "")
+          
+          if [ -z "$FUNCTION_NAME" ]; then
+            # Fallback: try common naming pattern
+            FUNCTION_NAME="${{ env.APP_NAME }}-api-prod"
+          fi
+          
+          echo "function_name=${FUNCTION_NAME}" >> $GITHUB_OUTPUT
+          echo "Lambda function: ${FUNCTION_NAME}"
+          
+          # Get current version (deployed by CI/CD)
+          CURRENT_VERSION=$(aws lambda get-alias \
+            --function-name "${FUNCTION_NAME}" \
+            --name "live" \
+            --query 'FunctionVersion' \
+            --output text 2>/dev/null || echo "")
+          
+          if [ -z "$CURRENT_VERSION" ]; then
+            echo "::warning::No 'live' alias found - rollback may not work"
+            echo "current_version=" >> $GITHUB_OUTPUT
+            echo "previous_version=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          echo "current_version=${CURRENT_VERSION}" >> $GITHUB_OUTPUT
+          echo "Current version: ${CURRENT_VERSION}"
+          
+          # Get previous version (for rollback)
+          # List all versions, sort by version number, get second-to-last
+          PREVIOUS_VERSION=$(aws lambda list-versions-by-function \
+            --function-name "${FUNCTION_NAME}" \
+            --query 'Versions[?Version!=`$LATEST`].Version' \
+            --output text | tr '\t' '\n' | sort -n | tail -2 | head -1)
+          
+          if [ "$PREVIOUS_VERSION" = "$CURRENT_VERSION" ] || [ -z "$PREVIOUS_VERSION" ]; then
+            # Only one version exists
+            echo "::warning::No previous version available for rollback"
+            PREVIOUS_VERSION=""
+          fi
+          
+          echo "previous_version=${PREVIOUS_VERSION}" >> $GITHUB_OUTPUT
+          echo "Previous version: ${PREVIOUS_VERSION:-'(none)'}"
+
+  # ============================================================
+  # Smoke Test Suite (Critical Paths Only)
+  # ============================================================
+  smoke-tests:
+    needs: [check-trigger, capture-version]
+    if: needs.check-trigger.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      test_status: ${{ steps.test.outputs.status }}
+      summary: ${{ steps.summary.outputs.summary }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check-trigger.outputs.commit_sha }}
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Install Playwright browsers
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Wait for deployment to stabilize
+        run: |
+          APP_URL="${{ needs.check-trigger.outputs.app_url }}"
+          MAX_RETRIES=10
+          RETRY_DELAY=30
+          
+          echo "Waiting for ${APP_URL} to be ready..."
+          
+          for i in $(seq 1 $MAX_RETRIES); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${APP_URL}/api/health" || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "✓ Application is ready (attempt $i)"
+              exit 0
+            fi
+            echo "Attempt $i/$MAX_RETRIES: Got HTTP $STATUS, waiting ${RETRY_DELAY}s..."
+            sleep $RETRY_DELAY
+          done
+          
+          echo "::error::Application not ready after $((MAX_RETRIES * RETRY_DELAY))s"
+          exit 1
+
+      - name: Run smoke tests (@smoke tagged only)
+        id: smoke-tests
+        working-directory: frontend
+        continue-on-error: true
+        run: |
+          # Run only tests tagged with @smoke
+          # Use grep pattern to filter test files/descriptions
+          npx playwright test ../tests/e2e/ \
+            --project=chromium \
+            --grep "@smoke" \
+            --reporter=json,html \
+            --timeout=30000
+        env:
+          APP_URL: ${{ needs.check-trigger.outputs.app_url }}
+          API_BASE_URL: ${{ needs.check-trigger.outputs.app_url }}
+          TEST_USER_EMAIL: ${{ secrets.E2E_TEST_USER_EMAIL }}
+          TEST_USER_PASSWORD: ${{ secrets.E2E_TEST_USER_PASSWORD }}
+          E2E_SESSION_TOKEN: ${{ secrets.E2E_SESSION_TOKEN }}
+          CI: true
+
+      - name: Determine test status
+        id: test
+        run: |
+          SMOKE_STATUS="${{ steps.smoke-tests.outcome }}"
+          echo "Smoke tests: ${SMOKE_STATUS}"
+          
+          if [ "$SMOKE_STATUS" = "success" ]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "✅ All smoke tests passed"
+          else
+            echo "status=failure" >> $GITHUB_OUTPUT
+            echo "❌ Smoke tests failed"
+          fi
+
+      - name: Generate test summary
+        id: summary
+        if: always()
+        run: |
+          SUMMARY="Smoke tests: ${{ steps.smoke-tests.outcome }}"
+          echo "summary=${SUMMARY}" >> $GITHUB_OUTPUT
+          
+          echo "## 🔥 Production Smoke Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Suite | Result |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Smoke Tests | ${{ steps.smoke-tests.outcome == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${{ needs.check-trigger.outputs.app_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** ${{ needs.check-trigger.outputs.commit_sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.smoke-tests.outcome }}" != "success" ]; then
+            echo "⚠️ **Rollback will be triggered.**" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload test artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-test-results-${{ github.run_number }}
+          path: |
+            frontend/playwright-report/
+            frontend/test-results/
+          retention-days: 30
+
+      - name: Upload failure artifacts
+        uses: actions/upload-artifact@v4
+        if: failure() || steps.test.outputs.status == 'failure'
+        with:
+          name: smoke-failure-artifacts-${{ github.run_number }}
+          path: |
+            frontend/test-results/**/screenshot*.png
+            frontend/test-results/**/trace*.zip
+            frontend/test-results/**/video*.webm
+          retention-days: 30
+
+  # ============================================================
+  # Rollback on Failure
+  # ============================================================
+  rollback:
+    needs: [check-trigger, capture-version, smoke-tests]
+    if: |
+      always() &&
+      needs.smoke-tests.outputs.test_status == 'failure' &&
+      needs.capture-version.outputs.previous_version != '' &&
+      github.event.inputs.skip_rollback != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Rollback Lambda to previous version
+        id: rollback-lambda
+        run: |
+          FUNCTION_NAME="${{ needs.capture-version.outputs.function_name }}"
+          PREVIOUS_VERSION="${{ needs.capture-version.outputs.previous_version }}"
+          CURRENT_VERSION="${{ needs.capture-version.outputs.current_version }}"
+          
+          echo "🔄 Rolling back Lambda function..."
+          echo "Function: ${FUNCTION_NAME}"
+          echo "Current version: ${CURRENT_VERSION}"
+          echo "Rolling back to: ${PREVIOUS_VERSION}"
+          
+          # Update alias to point to previous version
+          aws lambda update-alias \
+            --function-name "${FUNCTION_NAME}" \
+            --name "live" \
+            --function-version "${PREVIOUS_VERSION}"
+          
+          RESULT=$?
+          if [ $RESULT -eq 0 ]; then
+            echo "✅ Lambda alias 'live' updated to version ${PREVIOUS_VERSION}"
+            echo "rollback_success=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Failed to update Lambda alias"
+            echo "rollback_success=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      - name: Invalidate CloudFront cache (if needed)
+        id: invalidate-cloudfront
+        continue-on-error: true
+        run: |
+          STACK_NAME="${{ needs.check-trigger.outputs.stack_name }}"
+          
+          # Get CloudFront distribution ID
+          CLOUDFRONT_ID=$(aws cloudformation describe-stacks \
+            --stack-name "${STACK_NAME}" \
+            --query 'Stacks[0].Outputs[?OutputKey==`CloudFrontDistributionId`].OutputValue' \
+            --output text 2>/dev/null || echo "")
+          
+          if [ -n "$CLOUDFRONT_ID" ]; then
+            echo "Invalidating CloudFront cache (${CLOUDFRONT_ID})..."
+            aws cloudfront create-invalidation \
+              --distribution-id "$CLOUDFRONT_ID" \
+              --paths "/api/*" \
+              --query 'Invalidation.Id' \
+              --output text
+            echo "✓ CloudFront invalidation started for API paths"
+          else
+            echo "⚠️ No CloudFront distribution found - skipping invalidation"
+          fi
+
+      - name: Verify rollback
+        run: |
+          APP_URL="${{ needs.check-trigger.outputs.app_url }}"
+          MAX_RETRIES=5
+          RETRY_DELAY=15
+          
+          echo "Verifying rollback..."
+          
+          # Wait for rollback to propagate
+          sleep 30
+          
+          for i in $(seq 1 $MAX_RETRIES); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${APP_URL}/api/health" || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ Application healthy after rollback (attempt $i)"
+              exit 0
+            fi
+            echo "Attempt $i/$MAX_RETRIES: Got HTTP $STATUS, waiting ${RETRY_DELAY}s..."
+            sleep $RETRY_DELAY
+          done
+          
+          echo "⚠️ Health check inconclusive after rollback - manual verification recommended"
+
+      - name: Rollback summary
+        if: always()
+        run: |
+          echo "## 🔄 Rollback Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Function** | \`${{ needs.capture-version.outputs.function_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **From Version** | ${{ needs.capture-version.outputs.current_version }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **To Version** | ${{ needs.capture-version.outputs.previous_version }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Lambda Rollback** | ${{ steps.rollback-lambda.outputs.rollback_success == 'true' && '✅ Success' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit that triggered rollback:** ${{ needs.check-trigger.outputs.commit_sha }}" >> $GITHUB_STEP_SUMMARY
+
+  # ============================================================
+  # Alert on Failure/Rollback
+  # ============================================================
+  notify:
+    needs: [check-trigger, capture-version, smoke-tests, rollback]
+    if: always() && needs.smoke-tests.outputs.test_status == 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post failure notification
+        run: |
+          ROLLBACK_STATUS="${{ needs.rollback.result }}"
+          
+          echo "## 🚨 Production Smoke Tests Failed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** ${{ needs.check-trigger.outputs.commit_sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${{ needs.check-trigger.outputs.app_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "$ROLLBACK_STATUS" = "success" ]; then
+            echo "✅ **Automatic rollback completed successfully.**" >> $GITHUB_STEP_SUMMARY
+            echo "Rolled back from version ${{ needs.capture-version.outputs.current_version }} to ${{ needs.capture-version.outputs.previous_version }}" >> $GITHUB_STEP_SUMMARY
+          elif [ "$ROLLBACK_STATUS" = "skipped" ]; then
+            echo "⚠️ **Rollback was skipped.**" >> $GITHUB_STEP_SUMMARY
+            echo "Reason: No previous version available or skip_rollback was set" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Rollback failed!** Manual intervention required." >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Review the test artifacts for details." >> $GITHUB_STEP_SUMMARY
+
+      - name: Notify Slack (if configured)
+        if: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
+        continue-on-error: true
+        run: |
+          ROLLBACK_STATUS="${{ needs.rollback.result }}"
+          COMMIT_SHA="${{ needs.check-trigger.outputs.commit_sha }}"
+          SHORT_SHA="${COMMIT_SHA:0:7}"
+          APP_URL="${{ needs.check-trigger.outputs.app_url }}"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          
+          if [ "$ROLLBACK_STATUS" = "success" ]; then
+            STATUS_EMOJI="🔄"
+            STATUS_TEXT="Automatic rollback completed"
+            COLOR="#FFA500"  # Orange
+          else
+            STATUS_EMOJI="🚨"
+            STATUS_TEXT="MANUAL INTERVENTION REQUIRED"
+            COLOR="#FF0000"  # Red
+          fi
+          
+          curl -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"attachments\": [{
+                \"color\": \"${COLOR}\",
+                \"blocks\": [
+                  {
+                    \"type\": \"header\",
+                    \"text\": {
+                      \"type\": \"plain_text\",
+                      \"text\": \"${STATUS_EMOJI} Production Smoke Tests Failed\",
+                      \"emoji\": true
+                    }
+                  },
+                  {
+                    \"type\": \"section\",
+                    \"fields\": [
+                      {\"type\": \"mrkdwn\", \"text\": \"*App:*\\n${{ env.APP_NAME }}\"},
+                      {\"type\": \"mrkdwn\", \"text\": \"*Commit:*\\n\`${SHORT_SHA}\`\"},
+                      {\"type\": \"mrkdwn\", \"text\": \"*Status:*\\n${STATUS_TEXT}\"},
+                      {\"type\": \"mrkdwn\", \"text\": \"*URL:*\\n${APP_URL}\"}
+                    ]
+                  },
+                  {
+                    \"type\": \"actions\",
+                    \"elements\": [
+                      {
+                        \"type\": \"button\",
+                        \"text\": {\"type\": \"plain_text\", \"text\": \"View Run\"},
+                        \"url\": \"${RUN_URL}\"
+                      }
+                    ]
+                  }
+                ]
+              }]
+            }"
+
+  # ============================================================
+  # Update Commit Status
+  # ============================================================
+  update-status:
+    needs: [check-trigger, smoke-tests, rollback]
+    if: always() && needs.check-trigger.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post commit status
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const testStatus = '${{ needs.smoke-tests.outputs.test_status }}';
+            const rollbackResult = '${{ needs.rollback.result }}';
+            const sha = '${{ needs.check-trigger.outputs.commit_sha }}';
+            
+            let state, description;
+            
+            if (testStatus === 'success') {
+              state = 'success';
+              description = 'Production smoke tests passed';
+            } else if (rollbackResult === 'success') {
+              state = 'failure';
+              description = 'Smoke tests failed - automatic rollback completed';
+            } else {
+              state = 'failure';
+              description = 'Smoke tests failed - manual intervention may be required';
+            }
+            
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: sha,
+              state: state,
+              context: 'smoke/prod',
+              description: description.substring(0, 140),
+              target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
+            });
+            
+            console.log(`Posted status '${state}' for commit ${sha}`);
+
+  # ============================================================
+  # Mark Deployment Complete (on success)
+  # ============================================================
+  deployment-complete:
+    needs: [check-trigger, smoke-tests]
+    if: needs.smoke-tests.outputs.test_status == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deployment verified
+        run: |
+          echo "## ✅ Production Deployment Verified" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All smoke tests passed successfully." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**URL:** ${{ needs.check-trigger.outputs.app_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** ${{ needs.check-trigger.outputs.commit_sha }}" >> $GITHUB_STEP_SUMMARY

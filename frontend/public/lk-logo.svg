@@ -1,0 +1,23 @@
+<svg viewBox="0 30 920 110" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet">
+  <g transform="translate(50, 120) skewX(-15)">
+    <text x="0" y="0" 
+          font-family="sans-serif" font-weight="700" font-size="80" 
+          fill="#666666" stroke="#666666" stroke-width="18" 
+          stroke-linejoin="round" letter-spacing="0" transform="scale(2, 1)">
+      LEAPKICK
+    </text>
+    
+    <text x="0" y="0" 
+          font-family="sans-serif" font-weight="700" font-size="80" 
+          fill="white" stroke="white" stroke-width="12" 
+          stroke-linejoin="round" letter-spacing="0" transform="scale(2, 1)">
+      LEAPKICK
+    </text>
+
+    <g font-family="sans-serif" font-weight="700" font-size="80" letter-spacing="0" stroke-linejoin="round" paint-order="stroke fill" transform="scale(2, 1)">
+      <text x="0" y="0">
+        <tspan fill="#3498db" stroke="#2171a1" stroke-width="2">LEAP</tspan><tspan fill="#e67e22" stroke="#a3540d" stroke-width="2">KICK</tspan>
+      </text>
+    </g>
+  </g>
+</svg>

@@ -1,0 +1,44 @@
+name: Auto-merge to Production
+
+on:
+  workflow_run:
+    workflows: ["CI/CD"]
+    types: [completed]
+    branches: [develop]
+
+jobs:
+  auto-merge:
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'develop'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: develop
+
+      - name: Check if behind main
+        id: check
+        run: |
+          git fetch origin main
+          BEHIND=$(git rev-list --count develop..origin/main)
+          if [ "$BEHIND" -gt 0 ]; then
+            echo "develop is behind main, skipping auto-merge"
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create PR
+        if: steps.check.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_URL=$(gh pr create --base main --head develop --title "Auto-merge: develop → main" --body "Automated merge after successful dev deployment." 2>/dev/null || gh pr list --head develop --base main --json url -q '.[0].url')
+          echo "PR_URL=$PR_URL" >> $GITHUB_ENV
+
+      - name: Merge PR
+        if: steps.check.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr merge "$PR_URL" --auto --squash

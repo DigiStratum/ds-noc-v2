@@ -1,0 +1,10 @@
+# Tool versions for asdf/mise version management
+# This file pins tool versions to prevent drift (e.g., go.mod auto-upgrades)
+#
+# Install tools: mise install (or asdf install)
+# Verify versions: ./scripts/check-tool-versions.sh
+#
+# The pre-commit hook verifies these match your local environment.
+
+golang 1.26.1
+nodejs 23.11.0

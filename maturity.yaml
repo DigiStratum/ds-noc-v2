@@ -1,0 +1,109 @@
+# Maturity configuration for automated assessment
+# See docs/maturity-schema.md for schema documentation
+# See docs/MATURITY.md for human-readable maturity model
+
+schema_version: 1
+
+# App-specific overrides (set in derived apps, not template)
+current_level: 0
+target_level: 2
+
+levels:
+  0:
+    name: Prototype
+    description: "Works, no quality gates"
+    checks: []
+
+  1:
+    name: Development
+    description: "Unit tests, CI builds"
+    checks:
+      - type: coverage
+        target: backend
+        min: 40
+      - type: coverage
+        target: frontend
+        min: 30
+      - type: file_exists
+        path: .github/workflows/ci.yml
+      - type: file_exists
+        path: README.md
+      - type: command
+        name: "Backend builds"
+        run: "cd backend && go build ./..."
+      - type: command
+        name: "Frontend builds"
+        run: "cd frontend && pnpm build"
+
+  2:
+    name: Beta
+    description: "E2E tests, auto-deploy to dev"
+    checks:
+      - type: coverage
+        target: backend
+        min: 60
+      - type: coverage
+        target: frontend
+        min: 50
+      - type: file_exists
+        path: .github/workflows/deploy-dev.yml
+      - type: endpoint
+        name: "Health check"
+        url: "/api/health"
+        expect_status: 200
+      - type: endpoint
+        name: "HAL discovery"
+        url: "/api/discovery"
+        expect_status: 200
+      - type: command
+        name: "E2E tests pass"
+        run: "cd frontend && pnpm test:e2e"
+
+  3:
+    name: Production
+    description: "Full NFRs, monitoring, security review"
+    checks:
+      - type: coverage
+        target: backend
+        min: 80
+      - type: coverage
+        target: frontend
+        min: 70
+      - type: file_exists
+        path: .github/workflows/deploy-prod.yml
+      - type: file_exists
+        path: docs/runbook.md
+      - type: endpoint
+        name: "Build info endpoint"
+        url: "/api/build"
+        expect_status: 200
+      - type: command
+        name: "Dependency security scan (npm)"
+        run: "cd frontend && npm audit --audit-level=high"
+      - type: command
+        name: "Dependency security scan (go)"
+        run: "cd backend && govulncheck ./..."
+      - type: command
+        name: "CloudWatch alarms exist"
+        run: "aws cloudwatch describe-alarms --alarm-name-prefix ${APP_NAME}- --query 'MetricAlarms[].AlarmName' | jq -e 'length > 0'"
+
+  4:
+    name: Mature
+    description: "Performance validated, DR tested"
+    checks:
+      - type: coverage
+        target: backend
+        min: 80
+      - type: coverage
+        target: frontend
+        min: 70
+      - type: file_exists
+        path: docs/architecture.md
+      - type: file_exists
+        path: docs/dr-plan.md
+      - type: command
+        name: "Lighthouse accessibility score"
+        run: "lighthouse --quiet --chrome-flags='--headless' --only-categories=accessibility ${APP_URL} --output=json | jq -e '.categories.accessibility.score >= 0.9'"
+      - type: command
+        name: "Bundle size check"
+        run: "cd frontend && pnpm build && du -sk dist | awk '{exit ($1 > 300 ? 1 : 0)}'"

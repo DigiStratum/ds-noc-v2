@@ -1,0 +1,343 @@
+# E2E Tests for Dev Environment
+# Runs after successful dev deployment to validate before prod promotion
+#
+# Required GitHub Secrets:
+#   E2E_TEST_USER_EMAIL    - Test user email for authenticated tests
+#   E2E_TEST_USER_PASSWORD - Test user password
+#
+# Alternatively:
+#   E2E_SESSION_TOKEN      - Pre-authenticated session token (if app supports it)
+#
+# This workflow blocks promotion to production when tests fail.
+# See: docs/e2e-testing.md for setup instructions
+
+name: E2E Tests (Dev)
+
+on:
+  # Trigger after CI/CD workflow completes
+  workflow_run:
+    workflows: ["CI/CD"]
+    types: [completed]
+    branches: [develop]
+
+  # Allow manual triggering for debugging
+  workflow_dispatch:
+    inputs:
+      app_url:
+        description: 'Dev environment URL to test against'
+        required: false
+        type: string
+
+env:
+  NODE_VERSION: '20'
+  PNPM_VERSION: '8'
+  APP_NAME: 'ds-noc-v2'  # Replaced by create-app.sh
+
+# Required for posting status checks
+permissions:
+  statuses: write
+  contents: read
+  actions: read
+
+jobs:
+  # ============================================================
+  # Template Detection - Skip for ds-app-template itself
+  # ============================================================
+  template-check:
+    runs-on: ubuntu-latest
+    outputs:
+      is_template: ${{ steps.check.outputs.is_template }}
+    steps:
+      - name: Check if running on template repo
+        id: check
+        run: |
+          if [[ "${{ github.repository }}" == *"ds-app-template"* ]]; then
+            echo "is_template=true" >> $GITHUB_OUTPUT
+            echo "⚠️ This is ds-app-template - E2E tests will be skipped"
+          else
+            echo "is_template=false" >> $GITHUB_OUTPUT
+          fi
+
+  # ============================================================
+  # Check if triggering workflow was successful
+  # ============================================================
+  check-trigger:
+    needs: template-check
+    if: needs.template-check.outputs.is_template != 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+      app_url: ${{ steps.check.outputs.app_url }}
+      commit_sha: ${{ steps.check.outputs.commit_sha }}
+    steps:
+      - name: Check workflow_run trigger
+        id: check
+        run: |
+          EVENT="${{ github.event_name }}"
+          
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            # Manual trigger - always run
+            APP_URL="${{ github.event.inputs.app_url }}"
+            if [ -z "$APP_URL" ]; then
+              # Default to dev domain pattern
+              APP_URL="https://${{ env.APP_NAME }}.dev.digistratum.com"
+            fi
+            echo "should_run=true" >> $GITHUB_OUTPUT
+            echo "app_url=${APP_URL}" >> $GITHUB_OUTPUT
+            echo "commit_sha=${{ github.sha }}" >> $GITHUB_OUTPUT
+            echo "✓ Manual trigger - testing ${APP_URL}"
+          elif [ "$EVENT" = "workflow_run" ]; then
+            # Check if CI/CD workflow succeeded
+            CONCLUSION="${{ github.event.workflow_run.conclusion }}"
+            BRANCH="${{ github.event.workflow_run.head_branch }}"
+            SHA="${{ github.event.workflow_run.head_sha }}"
+            
+            echo "CI/CD conclusion: ${CONCLUSION}"
+            echo "Branch: ${BRANCH}"
+            echo "Commit: ${SHA}"
+            
+            if [ "$CONCLUSION" = "success" ] && [ "$BRANCH" = "develop" ]; then
+              APP_URL="https://${{ env.APP_NAME }}.dev.digistratum.com"
+              echo "should_run=true" >> $GITHUB_OUTPUT
+              echo "app_url=${APP_URL}" >> $GITHUB_OUTPUT
+              echo "commit_sha=${SHA}" >> $GITHUB_OUTPUT
+              echo "✓ CI/CD succeeded - will run E2E tests against ${APP_URL}"
+            else
+              echo "should_run=false" >> $GITHUB_OUTPUT
+              echo "⏭️ Skipping E2E - CI/CD did not succeed or wrong branch"
+            fi
+          fi
+
+  # ============================================================
+  # E2E Test Suite
+  # ============================================================
+  e2e-tests:
+    needs: check-trigger
+    if: needs.check-trigger.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      test_status: ${{ steps.test.outputs.status }}
+      summary: ${{ steps.summary.outputs.summary }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Use the commit from the triggering workflow
+          ref: ${{ needs.check-trigger.outputs.commit_sha }}
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Install Playwright browsers
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Wait for deployment to be ready
+        run: |
+          APP_URL="${{ needs.check-trigger.outputs.app_url }}"
+          MAX_RETRIES=20
+          RETRY_DELAY=15
+          
+          echo "Waiting for ${APP_URL} to be ready..."
+          
+          for i in $(seq 1 $MAX_RETRIES); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${APP_URL}/api/health" || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "✓ Application is ready (attempt $i)"
+              exit 0
+            fi
+            echo "Attempt $i/$MAX_RETRIES: Got HTTP $STATUS, waiting ${RETRY_DELAY}s..."
+            sleep $RETRY_DELAY
+          done
+          
+          echo "::error::Application not ready after $((MAX_RETRIES * RETRY_DELAY))s"
+          exit 1
+
+      - name: Run API E2E tests
+        id: api-tests
+        working-directory: frontend
+        continue-on-error: true
+        run: |
+          npx playwright test ../tests/e2e/api/ --project=chromium --reporter=json,html
+        env:
+          APP_URL: ${{ needs.check-trigger.outputs.app_url }}
+          API_BASE_URL: ${{ needs.check-trigger.outputs.app_url }}
+          TEST_USER_EMAIL: ${{ secrets.E2E_TEST_USER_EMAIL }}
+          TEST_USER_PASSWORD: ${{ secrets.E2E_TEST_USER_PASSWORD }}
+          E2E_SESSION_TOKEN: ${{ secrets.E2E_SESSION_TOKEN }}
+          CI: true
+
+      - name: Run UI E2E tests
+        id: ui-tests
+        working-directory: frontend
+        continue-on-error: true
+        run: |
+          npx playwright test ../tests/e2e/ui/ --project=chromium --reporter=json,html
+        env:
+          APP_URL: ${{ needs.check-trigger.outputs.app_url }}
+          API_BASE_URL: ${{ needs.check-trigger.outputs.app_url }}
+          TEST_USER_EMAIL: ${{ secrets.E2E_TEST_USER_EMAIL }}
+          TEST_USER_PASSWORD: ${{ secrets.E2E_TEST_USER_PASSWORD }}
+          E2E_SESSION_TOKEN: ${{ secrets.E2E_SESSION_TOKEN }}
+          CI: true
+
+      - name: Run Security E2E tests
+        id: security-tests
+        working-directory: frontend
+        continue-on-error: true
+        run: |
+          npx playwright test ../tests/e2e/security/ --project=chromium --reporter=json,html
+        env:
+          APP_URL: ${{ needs.check-trigger.outputs.app_url }}
+          API_BASE_URL: ${{ needs.check-trigger.outputs.app_url }}
+          TEST_USER_EMAIL: ${{ secrets.E2E_TEST_USER_EMAIL }}
+          TEST_USER_PASSWORD: ${{ secrets.E2E_TEST_USER_PASSWORD }}
+          E2E_SESSION_TOKEN: ${{ secrets.E2E_SESSION_TOKEN }}
+          CI: true
+
+      - name: Determine overall test status
+        id: test
+        run: |
+          API_STATUS="${{ steps.api-tests.outcome }}"
+          UI_STATUS="${{ steps.ui-tests.outcome }}"
+          SECURITY_STATUS="${{ steps.security-tests.outcome }}"
+          
+          echo "API tests: ${API_STATUS}"
+          echo "UI tests: ${UI_STATUS}"
+          echo "Security tests: ${SECURITY_STATUS}"
+          
+          if [ "$API_STATUS" = "success" ] && [ "$UI_STATUS" = "success" ] && [ "$SECURITY_STATUS" = "success" ]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "✅ All E2E tests passed"
+          else
+            echo "status=failure" >> $GITHUB_OUTPUT
+            echo "❌ Some E2E tests failed"
+          fi
+
+      - name: Generate test summary
+        id: summary
+        if: always()
+        run: |
+          # Create a summary of test results
+          SUMMARY="API: ${{ steps.api-tests.outcome }}, UI: ${{ steps.ui-tests.outcome }}, Security: ${{ steps.security-tests.outcome }}"
+          echo "summary=${SUMMARY}" >> $GITHUB_OUTPUT
+          
+          echo "## E2E Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Suite | Result |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| API | ${{ steps.api-tests.outcome == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| UI | ${{ steps.ui-tests.outcome == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Security | ${{ steps.security-tests.outcome == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${{ needs.check-trigger.outputs.app_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** ${{ needs.check-trigger.outputs.commit_sha }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload test artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-test-results-${{ github.run_number }}
+          path: |
+            frontend/playwright-report/
+            frontend/test-results/
+            frontend/e2e-results.json
+          retention-days: 30
+
+      - name: Upload failure artifacts (screenshots, traces)
+        uses: actions/upload-artifact@v4
+        if: failure() || steps.test.outputs.status == 'failure'
+        with:
+          name: e2e-failure-artifacts-${{ github.run_number }}
+          path: |
+            frontend/test-results/**/screenshot*.png
+            frontend/test-results/**/trace*.zip
+            frontend/test-results/**/video*.webm
+          retention-days: 30
+
+  # ============================================================
+  # Update commit status (for branch protection)
+  # ============================================================
+  update-status:
+    needs: [check-trigger, e2e-tests]
+    if: always() && needs.check-trigger.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post status check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const testStatus = '${{ needs.e2e-tests.outputs.test_status }}';
+            const summary = '${{ needs.e2e-tests.outputs.summary }}';
+            const sha = '${{ needs.check-trigger.outputs.commit_sha }}';
+            const appUrl = '${{ needs.check-trigger.outputs.app_url }}';
+            
+            const state = testStatus === 'success' ? 'success' : 'failure';
+            const description = testStatus === 'success' 
+              ? 'All E2E tests passed'
+              : `E2E tests failed: ${summary}`;
+            
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: sha,
+              state: state,
+              context: 'e2e/dev',
+              description: description.substring(0, 140), // GitHub limit
+              target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
+            });
+            
+            console.log(`Posted status '${state}' for commit ${sha}`);
+
+  # ============================================================
+  # Notify on failure (optional)
+  # ============================================================
+  notify-failure:
+    needs: [check-trigger, e2e-tests]
+    if: failure() || needs.e2e-tests.outputs.test_status == 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post failure notification
+        run: |
+          echo "## ❌ E2E Tests Failed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** ${{ needs.check-trigger.outputs.commit_sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${{ needs.check-trigger.outputs.app_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "⚠️ **Promotion to production is blocked until these tests pass.**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Review the test artifacts for screenshots and traces." >> $GITHUB_STEP_SUMMARY
+          
+          # If you have a notification channel configured, post here
+          # Example: curl -X POST ${{ secrets.SLACK_WEBHOOK_URL }} -d '{"text":"E2E tests failed..."}'
+
+      # Uncomment to enable Slack notifications
+      # - name: Notify Slack
+      #   if: ${{ secrets.SLACK_WEBHOOK_URL }}
+      #   run: |
+      #     curl -X POST ${{ secrets.SLACK_WEBHOOK_URL }} \
+      #       -H "Content-Type: application/json" \
+      #       -d '{
+      #         "text": "❌ E2E tests failed for ${{ env.APP_NAME }} (dev)",
+      #         "blocks": [
+      #           {
+      #             "type": "section",
+      #             "text": {
+      #               "type": "mrkdwn",
+      #               "text": "*E2E Tests Failed*\n• App: `${{ env.APP_NAME }}`\n• Commit: `${{ needs.check-trigger.outputs.commit_sha }}`\n• <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"
+      #             }
+      #           }
+      #         ]
+      #       }'

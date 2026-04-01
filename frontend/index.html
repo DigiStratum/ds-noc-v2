@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DS Noc V2</title>
+    <!-- FOUC Prevention: Hide content until CSS loads -->
+    <style>
+      /* Hide root until Tailwind loads */
+      #root { opacity: 0; transition: opacity 0.2s ease-in; }
+      #root.loaded { opacity: 1; }
+      
+      /* Initial loader - uses no external CSS */
+      #initial-loader {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #F9FAFB;
+        z-index: 9999;
+        transition: opacity 0.2s ease-out;
+      }
+      #initial-loader.hide { opacity: 0; pointer-events: none; }
+      
+      /* Simple spinner */
+      .loader-spinner {
+        width: 40px;
+        height: 40px;
+        border: 3px solid #E5E7EB;
+        border-top-color: #3B82F6;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      
+      /* Dark mode support */
+      @media (prefers-color-scheme: dark) {
+        #initial-loader { background: #111827; }
+        .loader-spinner { border-color: #374151; border-top-color: #3B82F6; }
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Initial loader shown until CSS + JS ready -->
+    <div id="initial-loader">
+      <div class="loader-spinner"></div>
+    </div>
+    
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+    
+    <!-- Reveal content once CSS is loaded -->
+    <script>
+      // Check if Tailwind styles are loaded by testing a known class
+      function checkCssLoaded() {
+        const testEl = document.createElement('div');
+        testEl.className = 'hidden';
+        document.body.appendChild(testEl);
+        const isLoaded = getComputedStyle(testEl).display === 'none';
+        document.body.removeChild(testEl);
+        return isLoaded;
+      }
+      
+      function revealContent() {
+        const loader = document.getElementById('initial-loader');
+        const root = document.getElementById('root');
+        if (loader) loader.classList.add('hide');
+        if (root) root.classList.add('loaded');
+        // Remove loader from DOM after transition
+        setTimeout(() => loader?.remove(), 300);
+      }
+      
+      // Poll for CSS load (fallback timeout of 3s)
+      let attempts = 0;
+      const maxAttempts = 30;
+      const checkInterval = setInterval(() => {
+        attempts++;
+        if (checkCssLoaded() || attempts >= maxAttempts) {
+          clearInterval(checkInterval);
+          revealContent();
+        }
+      }, 100);
+    </script>
+  </body>
+</html>

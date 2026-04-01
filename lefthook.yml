@@ -1,0 +1,61 @@
+# Lefthook pre-commit hooks for DS Ecosystem apps
+# https://github.com/evilmartians/lefthook
+#
+# Skip with: git commit --no-verify
+# Install:   lefthook install
+
+pre-commit:
+  parallel: false
+  commands:
+    # Tool version verification (runs first to catch drift early)
+    check-tool-versions:
+      run: ./scripts/check-tool-versions.sh
+      fail_text: |
+        Tool version mismatch detected!
+        This prevents go.mod from auto-upgrading when using newer Go versions.
+        Install correct versions with: mise install (or asdf install)
+
+    # Go formatting (backend)
+    go-fmt:
+      root: backend/
+      glob: "**/*.go"
+      run: gofmt -l -w {staged_files} && git add {staged_files}
+      stage_fixed: true
+
+    # Go linting (backend)
+    go-vet:
+      root: backend/
+      glob: "**/*.go"
+      run: go vet ./...
+
+    # Go unit tests (backend) - short mode only
+    go-test:
+      root: backend/
+      run: go test -short ./...
+
+    # JavaScript/TypeScript formatting (frontend)
+    prettier:
+      root: frontend/
+      glob: "**/*.{ts,tsx,js,jsx,json,css,md}"
+      run: npx prettier --write {staged_files} && git add {staged_files}
+      stage_fixed: true
+
+    # JavaScript/TypeScript linting (frontend)
+    eslint:
+      root: frontend/
+      glob: "**/*.{ts,tsx,js,jsx}"
+      run: npx eslint {staged_files} --max-warnings 0
+
+    # Frontend unit tests (passWithNoTests for new apps)
+    npm-test:
+      root: frontend/
+      run: npm test -- --run --reporter=basic --passWithNoTests
+
+    # DS validation hooks (placeholders - skip until commands exist)
+    # ds-validate-requirements:
+    #   run: ds-validate requirements
+    #   skip: true
+
+    # ds-validate-coverage:
+    #   run: ds-validate coverage
+    #   skip: true
