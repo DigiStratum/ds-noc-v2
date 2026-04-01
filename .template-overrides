@@ -11,6 +11,10 @@ frontend/src/components/ServiceDetail.test.tsx
 frontend/src/components/StatusBadge.tsx
 frontend/src/components/StatusBadge.test.tsx
 frontend/src/components/index.ts
+frontend/src/components/OperationsPanel.tsx
+frontend/src/components/OperationsPanel.test.tsx
+frontend/src/components/OverviewPanel.tsx
+frontend/src/components/OverviewPanel.test.tsx
 
 # Test setup
 frontend/src/test.setup.ts

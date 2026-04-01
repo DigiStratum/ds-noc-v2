@@ -26,6 +26,9 @@ func RegisterRoutes(mux *http.ServeMux) {
 
 	// Dashboard endpoint - returns aggregated NOC service health
 	mux.HandleFunc("GET /api/dashboard", ListDashboards)
+
+	// Operations endpoint - returns operational data for NOC operations panel
+	mux.HandleFunc("GET /api/operations", ListOperations)
 }
 
 // RegisterDiscoveryLinks returns HAL links for app-specific endpoints.

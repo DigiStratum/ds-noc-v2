@@ -20,6 +20,7 @@ This document contains **AUTO-GENERATED markers** that scaffold commands append 
 - [FR-API-005] `GET /api/theme` - List themes
 - [FR-API-006] `GET /api/dashboard` - List dashboards
 - [FR-API-007] `GET /api/operations` - List operations
+- [FR-API-008] `GET /api/operations` - List operations
 
 **How it works:**
 1. Scaffold commands find the marker comment

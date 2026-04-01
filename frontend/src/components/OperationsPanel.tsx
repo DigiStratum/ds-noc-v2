@@ -5,7 +5,7 @@
 
 import { useState } from 'react';
 import { useOperations } from '../hooks';
-import type { SystemEvent, EventType, EventStatus } from '../types';
+import type { EventType, EventStatus } from '../types';
 
 type TabType = 'events' | 'actions' | 'maintenance';
 

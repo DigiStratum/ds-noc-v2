@@ -48,4 +48,27 @@ describe('ListOperations', () => {
       expect(response.status).toBe(401);
     });
   });
+
+
+  describe('GET /api/operations', () => {
+    /**
+     * @covers FR-API-XXX TODO: Assign requirement ID
+     */
+    it('returns 200 for authenticated request', async () => {
+      const response = await client.get('/api/operations');
+
+      expect(response.status).toBe(200);
+      // TODO: Add response body assertions
+    });
+
+    /**
+     * @covers FR-SEC-XXX Authentication required
+     */
+    it('returns 401 for unauthenticated request', async () => {
+      const unauthed = unauthenticatedClient();
+      const response = await unauthed.get('/api/operations');
+
+      expect(response.status).toBe(401);
+    });
+  });
 });
