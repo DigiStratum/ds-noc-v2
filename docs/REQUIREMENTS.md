@@ -100,6 +100,34 @@ This extracts all `[FR-*]` markers and maps them to `@implements`/`@covers` anno
 
 ## Functional Requirements
 
+### NOC Dashboard
+
+- **[FR-NOC-001]** Service Health Display
+  - Dashboard displays real-time status of all monitored services
+  - Each service shows: status (healthy/degraded/unhealthy), response time, uptime, version
+  - Overall status indicator reflects aggregate health
+  - Visual distinction between healthy, degraded, and unhealthy states
+
+- **[FR-NOC-002]** Real-time Updates
+  - Dashboard auto-refreshes at configurable interval (default: 30s)
+  - Manual refresh button available
+  - Status changes immediately reflected in UI
+  - Last updated timestamp displayed
+
+- **[FR-NOC-004]** Alerts Panel
+  - Display active alerts with severity indicators (critical/warning/info)
+  - Show alert message, affected service, and timestamp
+  - Allow acknowledging alerts
+  - Visual distinction for acknowledged vs unacknowledged alerts
+  - Badge showing count of unacknowledged alerts
+
+- **[FR-NOC-005]** Operations Panel
+  - Events list showing recent activity with timestamps
+  - Quick actions for common operations (restart, refresh, clear cache)
+  - Maintenance windows display with affected services and duration
+  - In-progress operations with progress indicators
+  - Confirmation dialog for destructive actions
+
 ### API Endpoints
 
 <!-- AUTO-GENERATED: add-endpoint -->
